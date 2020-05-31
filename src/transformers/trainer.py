@@ -240,6 +240,7 @@ class Trainer:
             batch_size=self.args.train_batch_size,
             sampler=train_sampler,
             collate_fn=self.data_collator.collate_batch,
+            drop_last=True,
         )
 
         return data_loader
