@@ -24,6 +24,8 @@ from torch import Tensor, device, dtype, nn
 from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
 
+from torchmeta.modules import MetaModule
+
 from .activations import get_activation
 from .configuration_utils import PretrainedConfig
 from .file_utils import (
@@ -240,8 +242,9 @@ class ModuleUtilsMixin:
         head_mask = head_mask.to(dtype=self.dtype)  # switch to fload if need + fp16 compatibility
         return head_mask
 
-
-class PreTrainedModel(nn.Module, ModuleUtilsMixin):
+# TODO: Make this meta-capable
+# TODO: This uses nn.Embedding frequently, what changes need made for this to be meta-capable?
+class PreTrainedModel(MetaModule, ModuleUtilsMixin):
     r""" Base class for all models.
 
         :class:`~transformers.PreTrainedModel` takes care of storing the configuration of the models and handles methods for loading/downloading/saving models
@@ -302,6 +305,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin):
         else:
             raise NotImplementedError
 
+    # TODO: this should accept nn.Module or MetaModule, so which should we expect?
     def set_input_embeddings(self, value: nn.Module):
         """
         Set model's input embeddings
@@ -1736,8 +1740,7 @@ class BeamHypotheses(object):
             ret = self.worst_score >= cur_score
             return ret
 
-
-class Conv1D(nn.Module):
+class Conv1D(MetaModule):
     def __init__(self, nf, nx):
         """ Conv1D layer as defined by Radford et al. for OpenAI GPT (and also used in GPT-2)
             Basically works like a Linear layer but the weights are transposed
@@ -1749,18 +1752,25 @@ class Conv1D(nn.Module):
         self.weight = nn.Parameter(w)
         self.bias = nn.Parameter(torch.zeros(nf))
 
-    def forward(self, x):
+    def forward(self, x, params=None):
+        if params:
+            weight = params.get('weight', None)
+            bias = params.get('bias', None)
+        else:
+            weight = self.weight
+            bias = self.bias
         size_out = x.size()[:-1] + (self.nf,)
-        x = torch.addmm(self.bias, x.view(-1, x.size(-1)), self.weight)
+        x = torch.addmm(bias, x.view(-1, x.size(-1)), weight)
         x = x.view(*size_out)
         return x
 
-
+# TODO: This is not meta-capable, do I need this method?
 class PoolerStartLogits(nn.Module):
     """ Compute SQuAD start_logits from sequence hidden states. """
 
     def __init__(self, config):
         super().__init__()
+        logging.warning("This class (PoolerStartLogits) does not support meta-learning methods.")
         self.dense = nn.Linear(config.hidden_size, 1)
 
     def forward(self, hidden_states, p_mask=None):
@@ -1779,13 +1789,14 @@ class PoolerStartLogits(nn.Module):
 
         return x
 
-
+# TODO: This is not meta-capable, do I need this method?
 class PoolerEndLogits(nn.Module):
     """ Compute SQuAD end_logits from sequence hidden states and start token hidden state.
     """
 
     def __init__(self, config):
         super().__init__()
+        logging.warning("This class (PoolerEndLogits) does not support meta-learning methods.")
         self.dense_0 = nn.Linear(config.hidden_size * 2, config.hidden_size)
         self.activation = nn.Tanh()
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -1826,12 +1837,13 @@ class PoolerEndLogits(nn.Module):
 
         return x
 
-
+# TODO: this method is not meta-capable
 class PoolerAnswerClass(nn.Module):
     """ Compute SQuAD 2.0 answer class from classification and start tokens hidden states. """
 
     def __init__(self, config):
         super().__init__()
+        logging.warning("This class (PoolerAnswerClass) does not support meta-learning methods.")
         self.dense_0 = nn.Linear(config.hidden_size * 2, config.hidden_size)
         self.activation = nn.Tanh()
         self.dense_1 = nn.Linear(config.hidden_size, 1, bias=False)
@@ -1873,7 +1885,7 @@ class PoolerAnswerClass(nn.Module):
 
         return x
 
-
+# TODO: This is not meta-capable
 class SQuADHead(nn.Module):
     r""" A SQuAD head inspired by XLNet.
 
@@ -1917,6 +1929,7 @@ class SQuADHead(nn.Module):
 
     def __init__(self, config):
         super().__init__()
+        logging.warning("This class (SQuADHead) does not support meta-learning methods.")
         self.start_n_top = config.start_n_top
         self.end_n_top = config.end_n_top
 
@@ -1990,7 +2003,7 @@ class SQuADHead(nn.Module):
         # or (if labels are provided) (total_loss,)
         return outputs
 
-
+# TODO: not meta-capable
 class SequenceSummary(nn.Module):
     r""" Compute a single vector summary of a sequence hidden states according to various possibilities:
         Args of the config class:
@@ -2009,7 +2022,7 @@ class SequenceSummary(nn.Module):
 
     def __init__(self, config: PretrainedConfig):
         super().__init__()
-
+        logging.warning("This class (SequenceSummary) does not support meta-learning methods.")
         self.summary_type = getattr(config, "summary_type", "last")
         if self.summary_type == "attn":
             # We should use a standard multi-head attention module with absolute positional embedding for that.
