@@ -33,6 +33,16 @@ try:
 except ImportError:
     _has_apex = False
 
+try:
+    import mlflow
+    _has_mlflow = True
+except ImportError:
+    _has_mlflow = False
+
+
+def is_mlflow_available():
+    return _has_mlflow
+
 
 def is_apex_available():
     return _has_apex
@@ -474,7 +484,8 @@ class Trainer:
                     steps_trained_in_current_epoch -= 1
                     continue
 
-                tr_loss += self._training_step(model, inputs, optimizer)
+                step_loss = self._training_step(model, inputs, optimizer)
+                tr_loss += step_loss
 
                 if (step + 1) % self.args.gradient_accumulation_steps == 0 or (
                     # last step in epoch but step is always smaller than gradient_accumulation_steps
@@ -490,6 +501,12 @@ class Trainer:
                         xm.optimizer_step(optimizer)
                     else:
                         optimizer.step()
+                    # log to mlflow too
+                    if is_mlflow_available():
+                        # personally, I only want this logged every 10 steps or so
+                        log_step = epoch*len(epoch_iterator)+step
+                        if log_step % 10 == 0:
+                            mlflow.log_metric('training/loss', step_loss, log_step)
 
                     scheduler.step()
                     model.zero_grad()
@@ -512,7 +529,7 @@ class Trainer:
                         self._log(logs)
 
                         if self.args.evaluate_during_training:
-                            self.evaluate()
+                            self.evaluate(training_step=epoch*len(epoch_iterator)+step)
 
                     if self.args.save_steps > 0 and self.global_step % self.args.save_steps == 0:
                         # In all cases (even distributed/parallel), self.model is always a reference
@@ -681,7 +698,7 @@ class Trainer:
             shutil.rmtree(checkpoint)
 
     def evaluate(
-        self, eval_dataset: Optional[Dataset] = None, prediction_loss_only: Optional[bool] = None,
+        self, eval_dataset: Optional[Dataset] = None, prediction_loss_only: Optional[bool] = None, training_step: int = None,
     ) -> Dict[str, float]:
         """
         Run evaluation and return metrics.
@@ -700,6 +717,11 @@ class Trainer:
         eval_dataloader = self.get_eval_dataloader(eval_dataset)
 
         output = self._prediction_loop(eval_dataloader, description="Evaluation")
+
+        # log to mlflow too
+        if is_mlflow_available():
+            mlflow.log_metric('eval/loss', output.metrics["eval_loss"], training_step)
+            # TODO: this will likely need updated
 
         self._log(output.metrics)
 

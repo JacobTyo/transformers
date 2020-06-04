@@ -147,10 +147,10 @@ class Attention(MetaModule):
         # need to use other params if in inner loop
         if params:
             bias = params.get('bias', None)
-            weight = params.get('weight', None)
+            #weight = params.get('weight', None)
         else:
             bias = self.bias
-            weight = self.weight
+            #weight = self.weight
 
         w = torch.matmul(q, k)
         if self.scale:
@@ -496,12 +496,12 @@ class GPT2Model(GPT2PreTrainedModel):
             # TODO: This is my ending point for the day.  The big question is: Do I need to make a torchmeta module list,
             # TODO: or can I just use the built in.  The problem with using the built in, is how do I get the right
             # TODO: subdict in the below statement?
-            print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
-            print('attempting to debug')
-            if params:
-                for k, v in params.items():
-                    print(k)
-            print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+            # print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+            # print('attempting to debug')
+            # if params:
+            #     for k, v in params.items():
+            #         print(k)
+            # print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
             outputs = block(
                 hidden_states,
                 layer_past=layer_past,
