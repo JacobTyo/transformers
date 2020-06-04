@@ -464,6 +464,11 @@ class Trainer:
 
             for step, inputs in enumerate(epoch_iterator):
 
+                # when operating with multiple GPU's, and a batch_size_per_gpu > 1, this errors on the last iteration
+                # for now, just skip this last iteration
+                if step == len(epoch_iterator) - 1:
+                    continue
+
                 # Skip past any already trained steps if resuming training
                 if steps_trained_in_current_epoch > 0:
                     steps_trained_in_current_epoch -= 1
