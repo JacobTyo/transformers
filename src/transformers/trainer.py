@@ -591,6 +591,7 @@ class Trainer:
         for k, v in inputs.items():
             inputs[k] = v.to(self.args.device)
 
+        # is this where the problems occur?
         outputs = model(**inputs)
         loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
 
