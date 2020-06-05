@@ -508,7 +508,7 @@ class GPT2Model(GPT2PreTrainedModel):
                 attention_mask=attention_mask,
                 head_mask=head_mask[i],
                 use_cache=use_cache,
-                params=get_subdict(params, 'block')
+                params=get_subdict(params, 'h.'+str(i))
             )
 
             hidden_states, present = outputs[:2]

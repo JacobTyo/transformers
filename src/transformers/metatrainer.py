@@ -3,6 +3,16 @@ from torchmeta.modules.parallel import DataParallel
 from torchmeta.utils import gradient_update_parameters
 from collections import OrderedDict
 
+try:
+    import mlflow
+    _has_mlflow = True
+except ImportError:
+    _has_mlflow = False
+
+
+def is_mlflow_available():
+    return _has_mlflow
+
 
 FIRST_ORDER_METHODS = ['fomaml']
 
@@ -19,12 +29,13 @@ class MetaTrainer(Trainer):
         tb_writer: Optional["SummaryWriter"] = None,
         optimizers: Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = None,
         meta_method: str = 'fomaml',
+        finetune_epochs: int = 0,
         num_inner_steps: int = 1,
+        first_order: bool = True,
     ):
         super().__init__(model, args, data_collator, train_dataset, eval_dataset, compute_metrics,
-                         prediction_loss_only, tb_writer, optimizers,)
+                         prediction_loss_only, tb_writer, optimizers, finetune_epochs, num_inner_steps, first_order)
         self.meta_method = meta_method
-        self.num_inner_steps = num_inner_steps
         if meta_method in FIRST_ORDER_METHODS:
             self.first_order = True
         else:
@@ -157,7 +168,7 @@ class MetaTrainer(Trainer):
         )
 
         step = 0
-        for epoch in range(int(self.args.num_train_epochs)):
+        for epoch in train_iterator:
 
             if isinstance(train_dataloader, DataLoader) and isinstance(train_dataloader.sampler, DistributedSampler):
                 train_dataloader.sampler.set_epoch(epoch)
@@ -168,13 +179,13 @@ class MetaTrainer(Trainer):
                 )
                 epoch_iterator = tqdm(parallel_loader, desc="Iteration", disable=not self.is_local_master())
             else:
-                epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=not self.is_local_master())
+                epoch_iterator = tqdm(self.train_dataset, desc="Iteration", disable=not self.is_local_master())
 
             outer_loss = 0
             # TODO: this will not work because dataloader returns things in terms of batch sizes.
             # TODO: what we want is a dataset that can mix and match books, and then return the dataset there
             # Can we fit the entire dataset in memory?
-            for i, bookdataset in enumerate(self.train_dataset):
+            for i, bookdataset in enumerate(epoch_iterator):
                 assert isinstance(bookdataset, Dataset), 'this is a meta-learning method, so the train_dataloader must return another dataset'
 
                 # now we need to get a dataloader from this dataset
@@ -198,8 +209,10 @@ class MetaTrainer(Trainer):
                 #     continue
 
                 # now the book dataset should return a meta-train and meta-test set
-
-                for j, data in enumerate(bookdataset):
+                # I had this wrong but it was working?
+                # TODO: This doesn't work with the dataloader but does with the dataset
+                inner_step = True
+                for j, data in enumerate(bookdataloader):
                     step += 1
                     # Skip past any already trained steps if resuming training
                     if steps_trained_in_current_epoch > 0:
@@ -207,8 +220,14 @@ class MetaTrainer(Trainer):
                         continue
 
                     # TODO: what about gradient accumulation?  For now assume none
-                    in_loss, params = self._inner_training_step(model, data['metatrain'], optimizer)
-                    outer_loss += self._outer_training_step(model, params, data['metatest'], optimizer)
+                    # gotta do some weird stuff to make inner outer loop work
+                    if inner_step:
+                        in_loss, params = self._inner_training_step(model, data, epoch * len(epoch_iterator) + step)
+                        inner_step = False
+                    else:
+                        step_loss = self._outer_training_step(model, params, data, optimizer)
+                        outer_loss += step_loss
+                        inner_step = True
 
                     if (step + 1) % self.args.gradient_accumulation_steps == 0 or (
                         # last step in epoch but step is always smaller than gradient_accumulation_steps
@@ -218,12 +237,21 @@ class MetaTrainer(Trainer):
                         if self.args.fp16:
                             torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), self.args.max_grad_norm)
                         else:
+                            tmp = model.parameters()
+                            for t in tmp:
+                                print(t)
                             torch.nn.utils.clip_grad_norm_(model.parameters(), self.args.max_grad_norm)
 
                         if is_tpu_available():
                             xm.optimizer_step(optimizer)
                         else:
                             optimizer.step()
+                        # log to mlflow too
+                        if is_mlflow_available():
+                            # personally, I only want this logged every 10 steps or so
+                            log_step = epoch * len(epoch_iterator) + step
+                            if log_step % 10 == 0:
+                                mlflow.log_metric('training/loss', step_loss, log_step)
 
                         scheduler.step()
                         model.zero_grad()
@@ -287,7 +315,7 @@ class MetaTrainer(Trainer):
         logger.info("\n\nTraining completed. Do not forget to share your model on huggingface.co/models =)\n\n")
         return TrainOutput(self.global_step, tr_loss / self.global_step)
 
-    def _inner_training_step(self, model: nn.Module, inputs: Dict[str, torch.Tensor], optimizer: torch.optim.Optimizer):
+    def _inner_training_step(self, model: nn.Module, inputs: Dict[str, torch.Tensor], outer_step: int = None):
         model.train()
 
         # print(type(inputs))
@@ -297,17 +325,19 @@ class MetaTrainer(Trainer):
         #     inputs[k] = v.to(self.args.device)
         # TODO: why is the loss just the output?
 
-        inputs = inputs.to(self.args.device)
+        for k, v in inputs.items():
+            inputs[k] = v.to(self.args.device)
 
         params = None
         loss = 0
         for i in range(int(self.num_inner_steps)):
             # TODO: what are inputs here?
-            outputs = model(inputs, params=params)
-            loss += outputs[0]
+            outputs = model(**inputs, params=params)
+            step_loss = outputs[0].mean()
+            loss += step_loss
             params = gradient_update_parameters(model,
                                                 params=params,
-                                                loss=loss,
+                                                loss=step_loss,
                                                 # TODO: This is likely not right - doesn't decay, but could be fine
                                                 step_size=self.args.learning_rate,
                                                 first_order=self.first_order)
@@ -323,17 +353,21 @@ class MetaTrainer(Trainer):
         # else:
         #     loss.backward()
 
+        if is_mlflow_available() and outer_step:
+            # personally, I only want this logged every 10 steps or so
+            if outer_step % 10 == 0:
+                mlflow.log_metric('training/inner_loss', loss.item(), outer_step)
+
         return loss.item(), params
 
     def _outer_training_step(self, model: nn.Module, params: OrderedDict, inputs: Dict[str, torch.Tensor], optimizer: torch.optim.Optimizer):
         model.train()
-        # is this needed?
         for k, v in inputs.items():
             inputs[k] = v.to(self.args.device)
         # TODO: why is the loss just the output?
         model.zero_grad()
         outputs = model(**inputs, params=params)
-        loss = outputs[0]
+        loss = outputs[0].mean()
         loss.backward()
 
         return loss.item()

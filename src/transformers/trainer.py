@@ -25,6 +25,9 @@ from .optimization import AdamW, get_linear_schedule_with_warmup
 from .trainer_utils import PREFIX_CHECKPOINT_DIR, EvalPrediction, PredictionOutput, TrainOutput
 from .training_args import TrainingArguments, is_tpu_available
 
+from torchmeta.utils import gradient_update_parameters
+
+
 
 try:
     from apex import amp
@@ -189,6 +192,9 @@ class Trainer:
         prediction_loss_only=False,
         tb_writer: Optional["SummaryWriter"] = None,
         optimizers: Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = None,
+        finetune_epochs: int = 0,
+        num_inner_steps: int = 1,
+        first_order: bool = True,
     ):
         """
         Trainer is a simple but feature-complete training and eval loop for PyTorch,
@@ -232,6 +238,9 @@ class Trainer:
             # Set an xla_device flag on the model's config.
             # We'll find a more elegant and not need to do this in the future.
             self.model.config.xla_device = True
+        self.finetune_epochs = finetune_epochs
+        self.num_inner_steps = num_inner_steps
+        self.first_order = first_order
 
     def get_train_dataloader(self) -> DataLoader:
         if self.train_dataset is None:
@@ -715,22 +724,77 @@ class Trainer:
                 - the eval loss
                 - the potential metrics computed from the predictions
         """
-        eval_dataloader = self.get_eval_dataloader(eval_dataset)
+        # TODO: I've taken this over and made it very specific to gutenburg, if I want to merge this back into the
+        #  upstream transformers module then I have a lot of work to do
+        book_perplexities = []
+        for i, bookdataset in enumerate(self.eval_dataset):
+            # assert isinstance(bookdataset,
+            #                   Dataset), 'this is a meta-learning method, so the train_dataloader must return another dataset'
 
-        output = self._prediction_loop(eval_dataloader, description="Evaluation")
+            # first, update on the test set
 
-        # log to mlflow too
+            # now we need to get a dataloader from this dataset
+            if is_tpu_available():
+                eval_sampler = get_tpu_sampler(self.eval_dataset)
+            else:
+                eval_sampler = (
+                    RandomSampler(self.eval_dataset)
+                    if self.args.local_rank == -1
+                    else DistributedSampler(self.eval_dataset)
+                )
+            bookdataloader = DataLoader(
+                bookdataset['metatrain'],
+                batch_size=self.args.eval_batch_size,
+                sampler=eval_sampler,
+                collate_fn=self.data_collator.collate_batch,
+                drop_last=True,
+            )
+            eval_steps = 0
+            done = False if self.finetune_epochs > 0 else True
+            params = None
+            # This is the inner update step
+            finetune_epoch = 0
+            while not done:
+                # TODO: seems the dataloader doesnt work here?
+                for j, data in enumerate(bookdataloader):
+                    # if fine_tune, then update on the metatrain data['metatrain']
+                    # then track loss on the metatest set
+                    for k, v in data.items():
+                        data[k] = v.to(self.args.device)
+
+                    outputs = self.model(**data, params=params)
+                    step_loss = outputs[0].mean()
+                    for _ in range(self.num_inner_steps):
+                        params = gradient_update_parameters(self.model,
+                                                            params=params,
+                                                            loss=step_loss,
+                                                            # TODO: This is likely not right - doesn't decay, but could be fine
+                                                            step_size=self.args.learning_rate,
+                                                            first_order=self.first_order)
+                finetune_epoch += 1
+                if finetune_epoch >= self.finetune_epochs:
+                    done = True
+                    break
+                
+            this_book_losses = []
+
+            for j, data in enumerate(bookdataset['metatest']):
+                inputs = {'input_ids': data, 'labels': data}
+                for k, v in inputs.items():
+                    inputs[k] = v.to(self.args.device)
+
+                outputs = self.model(**inputs, params=params)
+                step_loss = outputs[0].mean()
+                this_book_losses.append(step_loss.item())
+
+            book_perplexities.append(math.exp(np.mean(this_book_losses)))
+
         if is_mlflow_available():
-            mlflow.log_metric('eval/loss', output.metrics["eval_loss"], training_step)
-            # TODO: this will likely need updated
+            mlflow.log_metric('validation/avgperplexity', np.mean(book_perplexities), training_step)
+            mlflow.log_metric('validation/perplexitystd', np.std(book_perplexities), training_step)
+            mlflow.log_metric('validation/perplexityste', np.std(book_perplexities)/np.sqrt(len(book_perplexities)), training_step)
 
-        self._log(output.metrics)
-
-        if self.args.tpu_metrics_debug:
-            # tpu-comment: Logging debug metrics for PyTorch/XLA (compile, execute times, ops, etc.)
-            xm.master_print(met.metrics_report())
-
-        return output.metrics
+        return np.mean(book_perplexities)
 
     def predict(self, test_dataset: Dataset) -> PredictionOutput:
         """
