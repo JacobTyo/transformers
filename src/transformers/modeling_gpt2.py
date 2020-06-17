@@ -28,8 +28,8 @@ from .configuration_gpt2 import GPT2Config
 from .file_utils import add_start_docstrings, add_start_docstrings_to_callable
 from .modeling_utils import Conv1D, PreTrainedModel, SequenceSummary, prune_conv1d_layer
 
-from torchmeta.modules import MetaModule, MetaLayerNorm, MetaEmbedding, MetaLinear
-from torchmeta.modules.utils import get_subdict
+# from torchmeta.modules import MetaModule, MetaLayerNorm, MetaEmbedding, MetaLinear
+# from torchmeta.modules.utils import get_subdict
 
 
 logger = logging.getLogger(__name__)
@@ -99,7 +99,8 @@ def load_tf_weights_in_gpt2(model, config, gpt2_checkpoint_path):
 
 
 # TODO: make this a MetaModule
-class Attention(MetaModule):
+# class Attention(MetaModule):
+class Attention(nn.Module):
     def __init__(self, nx, n_ctx, config, scale=False):
         super().__init__()
         self.output_attentions = config.output_attentions
@@ -145,12 +146,13 @@ class Attention(MetaModule):
 
     def _attn(self, q, k, v, attention_mask=None, head_mask=None, params=None):
         # need to use other params if in inner loop
-        if params:
-            bias = params.get('bias', None)
-            #weight = params.get('weight', None)
-        else:
-            bias = self.bias
-            #weight = self.weight
+        # if params:
+        #     bias = params.get('bias', None)
+        #     #weight = params.get('weight', None)
+        # else:
+        #     bias = self.bias
+        #     #weight = self.weight
+        bias = self.bias
 
         w = torch.matmul(q, k)
         if self.scale:
@@ -189,7 +191,9 @@ class Attention(MetaModule):
             return x.permute(0, 2, 1, 3)  # (batch, head, seq_length, head_features)
 
     def forward(self, x, layer_past=None, attention_mask=None, head_mask=None, use_cache=False, params=None):
-        x = self.c_attn(x, params=get_subdict(params, 'c_attn'))
+        # x = self.c_attn(x, params=get_subdict(params, 'c_attn'))
+        x = self.c_attn(x)
+
         query, key, value = x.split(self.split_size, dim=2)
         query = self.split_heads(query)
         key = self.split_heads(key, k=True)
@@ -204,6 +208,7 @@ class Attention(MetaModule):
         else:
             present = (None,)
 
+        # I may have missed something here
         attn_outputs = self._attn(query, key, value, attention_mask, head_mask)
         a = attn_outputs[0]
 
@@ -214,7 +219,8 @@ class Attention(MetaModule):
         outputs = [a, present] + attn_outputs[1:]
         return outputs  # a, present, (attentions)
 
-class MLP(MetaModule):
+# class MLP(MetaModule):
+class MLP(nn.Module):
     def __init__(self, n_state, config):  # in MLP: n_state=3072 (4 * n_embd)
         super().__init__()
         nx = config.n_embd
@@ -224,34 +230,36 @@ class MLP(MetaModule):
         self.dropout = nn.Dropout(config.resid_pdrop)
 
     def forward(self, x, params=None):
-        h = self.act(self.c_fc(x, params=get_subdict(params, 'c_fc')))
-        h2 = self.c_proj(h, params=get_subdict(params, 'c_proj'))
+        h = self.act(self.c_fc(x)) #, params=get_subdict(params, 'c_fc')))
+        h2 = self.c_proj(h)  #, params=get_subdict(params, 'c_proj'))
         return self.dropout(h2)
 
 
 # TODO: Make this a MetaModule
-class Block(MetaModule):
+# class Block(MetaModule):
+class Block(nn.Module):
     def __init__(self, n_ctx, config, scale=False):
         super().__init__()
         nx = config.n_embd
-        self.ln_1 = MetaLayerNorm(nx, eps=config.layer_norm_epsilon)
+        # self.ln_1 = MetaLayerNorm(nx, eps=config.layer_norm_epsilon)
+        self.ln_1 = nn.LayerNorm(nx, eps=config.layer_norm_epsilon)
         self.attn = Attention(nx, n_ctx, config, scale)
-        self.ln_2 = MetaLayerNorm(nx, eps=config.layer_norm_epsilon)
+        # self.ln_2 = nn.LayerNorm(nx, eps=config.layer_norm_epsilon)
         self.mlp = MLP(4 * nx, config)
 
     def forward(self, x, layer_past=None, attention_mask=None, head_mask=None, use_cache=False, params=None):
         output_attn = self.attn(
-            self.ln_1(x, params=get_subdict(params, 'ln_1')),
+            self.ln_1(x),  # , params=get_subdict(params, 'ln_1')),
             layer_past=layer_past,
             attention_mask=attention_mask,
             head_mask=head_mask,
             use_cache=use_cache,
-            params=get_subdict(params, 'attn')
+            # params=get_subdict(params, 'attn')
         )
         a = output_attn[0]  # output_attn: a, present, (attentions)
 
         x = x + a
-        m = self.mlp(self.ln_2(x), params=get_subdict(params, 'mlp'))
+        m = self.mlp(self.ln_2(x))  #, params=get_subdict(params, 'mlp'))
         x = x + m
 
         outputs = [x] + output_attn[1:]
@@ -355,11 +363,14 @@ class GPT2Model(GPT2PreTrainedModel):
         self.output_hidden_states = config.output_hidden_states
         self.output_attentions = config.output_attentions
 
-        self.wte = MetaEmbedding(config.vocab_size, config.n_embd)
-        self.wpe = MetaEmbedding(config.n_positions, config.n_embd)
+        # self.wte = MetaEmbedding(config.vocab_size, config.n_embd)
+        self.wte = nn.Embedding(config.vocab_size, config.n_embd)
+        # self.wpe = MetaEmbedding(config.n_positions, config.n_embd)
+        self.wpe = nn.Embedding(config.n_positions, config.n_embd)
         self.drop = nn.Dropout(config.embd_pdrop)
         self.h = nn.ModuleList([Block(config.n_ctx, config, scale=True) for _ in range(config.n_layer)])
-        self.ln_f = MetaLayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
+        # self.ln_f = MetaLayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
+        self.ln_f = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
 
         self.init_weights()
 
@@ -387,7 +398,7 @@ class GPT2Model(GPT2PreTrainedModel):
         head_mask=None,
         inputs_embeds=None,
         use_cache=True,
-        params=None,
+        # params=None,
     ):
         r"""
     Return:
@@ -476,10 +487,10 @@ class GPT2Model(GPT2PreTrainedModel):
         head_mask = self.get_head_mask(head_mask, self.config.n_layer)
 
         if inputs_embeds is None:
-            inputs_embeds = self.wte(input_ids, params=get_subdict(params, 'wte'))
-        position_embeds = self.wpe(position_ids, params=get_subdict(params, 'wpe'))
+            inputs_embeds = self.wte(input_ids)  #, params=get_subdict(params, 'wte'))
+        position_embeds = self.wpe(position_ids)   #, params=get_subdict(params, 'wpe'))
         if token_type_ids is not None:
-            token_type_embeds = self.wte(token_type_ids, params=get_subdict(params, 'wte'))
+            token_type_embeds = self.wte(token_type_ids)  #, params=get_subdict(params, 'wte'))
         else:
             token_type_embeds = 0
         hidden_states = inputs_embeds + position_embeds + token_type_embeds
@@ -508,7 +519,7 @@ class GPT2Model(GPT2PreTrainedModel):
                 attention_mask=attention_mask,
                 head_mask=head_mask[i],
                 use_cache=use_cache,
-                params=get_subdict(params, 'h.'+str(i))
+                # params=get_subdict(params, 'h.'+str(i))
             )
 
             hidden_states, present = outputs[:2]
@@ -518,7 +529,7 @@ class GPT2Model(GPT2PreTrainedModel):
             if self.output_attentions:
                 all_attentions.append(outputs[2])
 
-        hidden_states = self.ln_f(hidden_states, params=get_subdict(params, 'ln_f'))
+        hidden_states = self.ln_f(hidden_states)  #, params=get_subdict(params, 'ln_f'))
 
         hidden_states = hidden_states.view(*output_shape)
         # Add last hidden state
@@ -547,7 +558,8 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         self.transformer = GPT2Model(config)
-        self.lm_head = MetaLinear(config.n_embd, config.vocab_size, bias=False)
+        # self.lm_head = MetaLinear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
         self.init_weights()
 
@@ -573,7 +585,7 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
         inputs_embeds=None,
         labels=None,
         use_cache=True,
-        params=None,
+        # params=None,
     ):
         r"""
         labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`, defaults to :obj:`None`):
@@ -626,11 +638,11 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
             head_mask=head_mask,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            params=get_subdict(params, 'transformer')
+            # params=get_subdict(params, 'transformer')
         )
         hidden_states = transformer_outputs[0]
 
-        lm_logits = self.lm_head(hidden_states, params=get_subdict(params, 'lm_head'))
+        lm_logits = self.lm_head(hidden_states) #, params=get_subdict(params, 'lm_head'))
 
         outputs = (lm_logits,) + transformer_outputs[1:]
         if labels is not None:
