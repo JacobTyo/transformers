@@ -25,7 +25,7 @@ from .optimization import AdamW, get_linear_schedule_with_warmup
 from .trainer_utils import PREFIX_CHECKPOINT_DIR, EvalPrediction, PredictionOutput, TrainOutput
 from .training_args import TrainingArguments, is_tpu_available
 
-from torchmeta.utils import gradient_update_parameters
+# from torchmeta.utils import gradient_update_parameters
 
 
 
@@ -762,15 +762,16 @@ class Trainer:
                     for k, v in data.items():
                         data[k] = v.to(self.args.device)
 
-                    outputs = self.model(**data, params=params)
+                    outputs = self.model(**data)  #, params=params)
                     step_loss = outputs[0].mean()
                     for _ in range(self.num_inner_steps):
-                        params = gradient_update_parameters(self.model,
-                                                            params=params,
-                                                            loss=step_loss,
-                                                            # TODO: This is likely not right - doesn't decay, but could be fine
-                                                            step_size=self.args.learning_rate,
-                                                            first_order=self.first_order)
+                        assert Fasle, 'inner update step is not yet implemented.'
+                        # params = gradient_update_parameters(self.model,
+                        #                                     params=params,
+                        #                                     loss=step_loss,
+                        #                                     # TODO: This is likely not right - doesn't decay, but could be fine
+                        #                                     step_size=self.args.learning_rate,
+                        #                                     first_order=self.first_order)
                 finetune_epoch += 1
                 if finetune_epoch >= self.finetune_epochs:
                     done = True
@@ -783,7 +784,7 @@ class Trainer:
                 for k, v in inputs.items():
                     inputs[k] = v.to(self.args.device)
 
-                outputs = self.model(**inputs, params=params)
+                outputs = self.model(**inputs)  #, params=params)
                 step_loss = outputs[0].mean()
                 this_book_losses.append(step_loss.item())
 

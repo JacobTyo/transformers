@@ -24,7 +24,7 @@ from torch import Tensor, device, dtype, nn
 from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
 
-from torchmeta.modules import MetaModule
+# from torchmeta.modules import MetaModule
 
 from .activations import get_activation
 from .configuration_utils import PretrainedConfig
@@ -244,7 +244,8 @@ class ModuleUtilsMixin:
 
 # TODO: Make this meta-capable
 # TODO: This uses nn.Embedding frequently, what changes need made for this to be meta-capable?
-class PreTrainedModel(MetaModule, ModuleUtilsMixin):
+# class PreTrainedModel(MetaModule, ModuleUtilsMixin):
+class PreTrainedModel(nn.Module, ModuleUtilsMixin):
     r""" Base class for all models.
 
         :class:`~transformers.PreTrainedModel` takes care of storing the configuration of the models and handles methods for loading/downloading/saving models
@@ -1740,7 +1741,8 @@ class BeamHypotheses(object):
             ret = self.worst_score >= cur_score
             return ret
 
-class Conv1D(MetaModule):
+# class Conv1D(MetaModule):
+class Conv1D(nn.Module):
     def __init__(self, nf, nx):
         """ Conv1D layer as defined by Radford et al. for OpenAI GPT (and also used in GPT-2)
             Basically works like a Linear layer but the weights are transposed
