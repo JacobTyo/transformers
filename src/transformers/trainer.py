@@ -724,8 +724,8 @@ class Trainer:
                 - the eval loss
                 - the potential metrics computed from the predictions
         """
-        # TODO: I've taken this over and made it very specific to gutenburg, if I want to merge this back into the
-        #  upstream transformers module then I have a lot of work to do
+        # TODO: first save the model
+
         book_perplexities = []
         for i, bookdataset in enumerate(self.eval_dataset):
             # assert isinstance(bookdataset,
@@ -755,17 +755,15 @@ class Trainer:
             # This is the inner update step
             finetune_epoch = 0
             while not done:
-                # TODO: seems the dataloader doesnt work here?
-                for j, data in enumerate(bookdataloader):
-                    # if fine_tune, then update on the metatrain data['metatrain']
-                    # then track loss on the metatest set
+                # TODO: this needs shuffled somehow
+                for j, data in enumerate(bookdataset['metatrain']):
                     for k, v in data.items():
                         data[k] = v.to(self.args.device)
 
                     outputs = self.model(**data)  #, params=params)
                     step_loss = outputs[0].mean()
                     for _ in range(self.num_inner_steps):
-                        assert Fasle, 'inner update step is not yet implemented.'
+                        assert False, 'inner update step is not yet implemented.'
                         # params = gradient_update_parameters(self.model,
                         #                                     params=params,
                         #                                     loss=step_loss,
