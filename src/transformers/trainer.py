@@ -742,7 +742,7 @@ class Trainer:
 
             # get an optimizer
             if optimizer is None:
-                t_total = len(eval_dataset)
+                t_total = len(self.eval_dataset)
                 optimizer, scheduler = self.get_optimizers(num_training_steps=t_total)
 
                 # Check if saved optimizer or scheduler states exist
