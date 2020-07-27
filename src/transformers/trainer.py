@@ -538,7 +538,7 @@ class Trainer:
                         self._log(logs)
 
                         if self.args.evaluate_during_training:
-                            self.evaluate(training_step=epoch*len(epoch_iterator)+step)
+                            self.evaluate(training_step=epoch*len(epoch_iterator)+step, model_path=model_path)
 
                     if self.args.save_steps > 0 and self.global_step % self.args.save_steps == 0:
                         # In all cases (even distributed/parallel), self.model is always a reference
@@ -709,6 +709,7 @@ class Trainer:
 
     def evaluate(
         self, eval_dataset: Optional[Dataset] = None, prediction_loss_only: Optional[bool] = None, training_step: int = None,
+            model_path: str = None, optimizer = None,
     ) -> Dict[str, float]:
         """
         Run evaluation and return metrics.
@@ -724,10 +725,39 @@ class Trainer:
                 - the eval loss
                 - the potential metrics computed from the predictions
         """
-        # TODO: first save the model
+        eval_here = [1, 2, 3, 4, 5, 10, 25, 50, 100, 500]
 
-        book_perplexities = []
+        # first save the model
+        original_model = self.model.state_dict()
+        book_perplexities = {}
         for i, bookdataset in enumerate(self.eval_dataset):
+
+            book_perplexities[i] = {
+                'train': [],
+                'test': []
+            }
+
+            # make sure model is original for each book
+            self.model.load_state_dict(original_model)
+
+            # get an optimizer
+            if optimizer is None:
+                t_total = len(eval_dataset)
+                optimizer, scheduler = self.get_optimizers(num_training_steps=t_total)
+
+                # Check if saved optimizer or scheduler states exist
+                if (
+                        model_path is not None
+                        and os.path.isfile(os.path.join(model_path, "optimizer.pt"))
+                        and os.path.isfile(os.path.join(model_path, "scheduler.pt"))
+                ):
+                    # Load in optimizer and scheduler states
+                    optimizer.load_state_dict(
+                        torch.load(os.path.join(model_path, "optimizer.pt"), map_location=self.args.device)
+                    )
+                self.model.zero_grad()
+                optimizer.zero_grad()
+
             # assert isinstance(bookdataset,
             #                   Dataset), 'this is a meta-learning method, so the train_dataloader must return another dataset'
 
@@ -735,63 +765,76 @@ class Trainer:
 
             # now we need to get a dataloader from this dataset
             if is_tpu_available():
-                eval_sampler = get_tpu_sampler(self.eval_dataset)
+                eval_sampler = get_tpu_sampler(bookdataset['metatrain'])
             else:
                 eval_sampler = (
-                    RandomSampler(self.eval_dataset)
+                    RandomSampler(bookdataset['metatrain'])
                     if self.args.local_rank == -1
-                    else DistributedSampler(self.eval_dataset)
+                    else DistributedSampler(bookdataset['metatrain'])
                 )
             bookdataloader = DataLoader(
                 bookdataset['metatrain'],
-                batch_size=self.args.eval_batch_size,
+                batch_size=self.args.train_batch_size,
                 sampler=eval_sampler,
                 collate_fn=self.data_collator.collate_batch,
                 drop_last=True,
             )
-            eval_steps = 0
             done = False if self.finetune_epochs > 0 else True
-            params = None
             # This is the inner update step
             finetune_epoch = 0
+            eval_step = 0
             while not done:
-                # TODO: this needs shuffled somehow
-                for j, data in enumerate(bookdataset['metatrain']):
-                    for k, v in data.items():
-                        data[k] = v.to(self.args.device)
+                loss = 0
+                for _ in range(self.num_inner_steps):
+                    eval_step += 1
+                    for j, data in enumerate(bookdataloader):
+                        for k, v in data.items():
+                            data[k] = v.to(self.args.device)
 
-                    outputs = self.model(**data)  #, params=params)
-                    step_loss = outputs[0].mean()
-                    for _ in range(self.num_inner_steps):
-                        assert False, 'inner update step is not yet implemented.'
-                        # params = gradient_update_parameters(self.model,
-                        #                                     params=params,
-                        #                                     loss=step_loss,
-                        #                                     # TODO: This is likely not right - doesn't decay, but could be fine
-                        #                                     step_size=self.args.learning_rate,
-                        #                                     first_order=self.first_order)
-                finetune_epoch += 1
-                if finetune_epoch >= self.finetune_epochs:
-                    done = True
-                    break
-                
-            this_book_losses = []
+                        outputs = self.model(**data)  #, params=params)
+                        if self.args.n_gpu > 1:
+                            loss += outputs[0].mean()
+                        else:
+                            loss += outputs[0]
+                    book_perplexities[i]['train'].append(loss.item())
+                    # if is_mlflow_available():
+                    #     mlflow.log_metric(f'metatrain/book{i}')
+                    loss.backward()
+                    optimizer.step()
+                    self.model.zero_grad()
+                    optimizer.zero_grad()
+                    finetune_epoch += 1
 
-            for j, data in enumerate(bookdataset['metatest']):
-                inputs = {'input_ids': data, 'labels': data}
-                for k, v in inputs.items():
-                    inputs[k] = v.to(self.args.device)
+                    this_book_losses = []
+                    if eval_step in eval_here:
+                        for j, data in enumerate(bookdataset['metatest']):
+                            inputs = {'input_ids': data, 'labels': data}
+                            for k, v in inputs.items():
+                                inputs[k] = v.to(self.args.device)
 
-                outputs = self.model(**inputs)  #, params=params)
-                step_loss = outputs[0].mean()
-                this_book_losses.append(step_loss.item())
+                            outputs = self.model(**inputs)  #, params=params)
+                            step_loss = outputs[0].mean()
+                            this_book_losses.append(step_loss.item())
+                        book_perplexities[i]['test'].append(np.mean(this_book_losses))
+                    if eval_step >= 501:  # self.finetune_epochs:
+                        done = True
+                        break
 
-            book_perplexities.append(math.exp(np.mean(this_book_losses)))
+            # book_perplexities[i]['test'].append(math.exp(np.mean(this_book_losses)))
 
         if is_mlflow_available():
-            mlflow.log_metric('validation/avgperplexity', np.mean(book_perplexities), training_step)
-            mlflow.log_metric('validation/perplexitystd', np.std(book_perplexities), training_step)
-            mlflow.log_metric('validation/perplexityste', np.std(book_perplexities)/np.sqrt(len(book_perplexities)), training_step)
+            # average loss per step for all books
+            average_losses = []
+            for i in eval_here:
+                average_losses.append(np.mean(book_perplexities[i]['test']))
+            mlflow.log_metric('train/avgfinetune_perf', average_losses)
+            print(average_losses)
+            # mlflow.log_metric('validation/avgperplexity', np.mean(book_perplexities), training_step)
+            # mlflow.log_metric('validation/perplexitystd', np.std(book_perplexities), training_step)
+            # mlflow.log_metric('validation/perplexityste', np.std(book_perplexities)/np.sqrt(len(book_perplexities)), training_step)
+
+        # make sure to reset model params
+        self.model.load_state_dict(original_model)
 
         return np.mean(book_perplexities)
 
