@@ -726,16 +726,17 @@ class Trainer:
                 - the potential metrics computed from the predictions
         """
         eval_here = [1, 2, 3, 4, 5, 10, 25, 50, 100, 500]
-
-        # first save the model
-        original_model = self.model.state_dict()
         book_perplexities = {}
-        for i, bookdataset in enumerate(self.eval_dataset):
-
+        for i in eval_here:
             book_perplexities[i] = {
                 'train': [],
                 'test': []
             }
+
+
+        # first save the model
+        original_model = self.model.state_dict()
+        for i, bookdataset in enumerate(self.eval_dataset):
 
             # make sure model is original for each book
             self.model.load_state_dict(original_model)
@@ -783,8 +784,10 @@ class Trainer:
             # This is the inner update step
             finetune_epoch = 0
             eval_step = 0
+            self.model.zero_grad()
+            optimizer.zero_grad()
+            loss = 0
             while not done:
-                loss = 0
                 for _ in range(self.num_inner_steps):
                     eval_step += 1
                     for j, data in enumerate(bookdataloader):
@@ -793,13 +796,16 @@ class Trainer:
 
                         outputs = self.model(**data)  #, params=params)
                         if self.args.n_gpu > 1:
-                            loss += outputs[0].mean()
+                            loss = outputs[0].mean()
                         else:
-                            loss += outputs[0]
-                    book_perplexities[i]['train'].append(loss.item())
+                            loss = outputs[0]
+                        loss.backward()
+                    tmp = loss if isinstance(loss, int) else loss.item()
+                    if eval_step in eval_here:
+                        book_perplexities[eval_step]['train'].append(tmp)
                     # if is_mlflow_available():
                     #     mlflow.log_metric(f'metatrain/book{i}')
-                    loss.backward()
+                    # loss.backward()
                     optimizer.step()
                     self.model.zero_grad()
                     optimizer.zero_grad()
@@ -815,7 +821,7 @@ class Trainer:
                             outputs = self.model(**inputs)  #, params=params)
                             step_loss = outputs[0].mean()
                             this_book_losses.append(step_loss.item())
-                        book_perplexities[i]['test'].append(np.mean(this_book_losses))
+                        book_perplexities[eval_step]['test'].append(np.mean(this_book_losses))
                     if eval_step >= 501:  # self.finetune_epochs:
                         done = True
                         break
@@ -825,9 +831,12 @@ class Trainer:
         if is_mlflow_available():
             # average loss per step for all books
             average_losses = []
+            average_train_loss = []
             for i in eval_here:
                 average_losses.append(np.mean(book_perplexities[i]['test']))
+                average_train_loss.append(np.mean(book_perplexities[i]['train']))
             mlflow.log_metric('train/avgfinetune_perf', average_losses)
+            mlflow.log_metric('test/avgfinetune_perf', average_train_loss)
             print(average_losses)
             # mlflow.log_metric('validation/avgperplexity', np.mean(book_perplexities), training_step)
             # mlflow.log_metric('validation/perplexitystd', np.std(book_perplexities), training_step)
