@@ -830,14 +830,9 @@ class Trainer:
 
         if is_mlflow_available():
             # average loss per step for all books
-            average_losses = []
-            average_train_loss = []
             for i in eval_here:
-                average_losses.append(np.mean(book_perplexities[i]['test']))
-                average_train_loss.append(np.mean(book_perplexities[i]['train']))
-            mlflow.log_metric('train/avgfinetune_perf', average_losses)
-            mlflow.log_metric('test/avgfinetune_perf', average_train_loss)
-            print(average_losses)
+                mlflow.log_metric('train/avgfinetune_perf', np.mean(book_perplexities[i]['train']), i)
+                mlflow.log_metric('test/avgfinetune_perf', np.mean(book_perplexities[i]['test']), i)
             # mlflow.log_metric('validation/avgperplexity', np.mean(book_perplexities), training_step)
             # mlflow.log_metric('validation/perplexitystd', np.std(book_perplexities), training_step)
             # mlflow.log_metric('validation/perplexityste', np.std(book_perplexities)/np.sqrt(len(book_perplexities)), training_step)
