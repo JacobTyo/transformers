@@ -821,7 +821,7 @@ class Trainer:
                             outputs = self.model(**inputs)  #, params=params)
                             step_loss = outputs[0].mean()
                             this_book_losses.append(step_loss.item())
-                        book_perplexities['test'][eval_step].append(math.exp(np.mean(this_book_losses)))
+                        book_perplexities['test'][eval_step].append(np.mean(this_book_losses))
                     if eval_step >= 501:  # self.finetune_epochs:
                         done = True
                         break
@@ -832,7 +832,7 @@ class Trainer:
             # average loss per step for all books
             for i in eval_here:
                 # mlflow.log_metric('train/avgfinetune_perf', np.mean(book_perplexities[i]['train']), i)
-                mlflow.log_metric('test/avgfinetune_perf', np.mean(book_perplexities['test'][i]), i)
+                mlflow.log_metric('test/avgfinetune_perf', math.exp(np.mean(book_perplexities['test'][i])), i)
             # mlflow.log_metric('validation/avgperplexity', np.mean(book_perplexities), training_step)
             # mlflow.log_metric('validation/perplexitystd', np.std(book_perplexities), training_step)
             # mlflow.log_metric('validation/perplexityste', np.std(book_perplexities)/np.sqrt(len(book_perplexities)), training_step)
