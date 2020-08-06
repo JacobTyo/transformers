@@ -725,14 +725,14 @@ class Trainer:
                 - the eval loss
                 - the potential metrics computed from the predictions
         """
+        self.model.train()
         eval_here = [1, 2, 3, 4, 5, 10, 25, 50, 100, 500]
         book_perplexities = {}
+        book_perplexities['train'] = {}
+        book_perplexities['test'] = {}
         for i in eval_here:
-            book_perplexities[i] = {
-                'train': [],
-                'test': []
-            }
-
+            book_perplexities['train'][i] = []
+            book_perplexities['test'][i] = []
 
         # first save the model
         original_model = self.model.state_dict()
@@ -801,8 +801,8 @@ class Trainer:
                             loss = outputs[0]
                         loss.backward()
                     tmp = loss if isinstance(loss, int) else loss.item()
-                    if eval_step in eval_here:
-                        book_perplexities[eval_step]['train'].append(tmp)
+                    # if eval_step in eval_here:
+                    #     book_perplexities[eval_step]['train'].append(tmp)
                     # if is_mlflow_available():
                     #     mlflow.log_metric(f'metatrain/book{i}')
                     # loss.backward()
@@ -821,7 +821,7 @@ class Trainer:
                             outputs = self.model(**inputs)  #, params=params)
                             step_loss = outputs[0].mean()
                             this_book_losses.append(step_loss.item())
-                        book_perplexities[eval_step]['test'].append(np.mean(this_book_losses))
+                        book_perplexities['test'][eval_step].append(math.exp(np.mean(this_book_losses)))
                     if eval_step >= 501:  # self.finetune_epochs:
                         done = True
                         break
@@ -831,8 +831,8 @@ class Trainer:
         if is_mlflow_available():
             # average loss per step for all books
             for i in eval_here:
-                mlflow.log_metric('train/avgfinetune_perf', np.mean(book_perplexities[i]['train']), i)
-                mlflow.log_metric('test/avgfinetune_perf', np.mean(book_perplexities[i]['test']), i)
+                # mlflow.log_metric('train/avgfinetune_perf', np.mean(book_perplexities[i]['train']), i)
+                mlflow.log_metric('test/avgfinetune_perf', np.mean(book_perplexities['test'][i]), i)
             # mlflow.log_metric('validation/avgperplexity', np.mean(book_perplexities), training_step)
             # mlflow.log_metric('validation/perplexitystd', np.std(book_perplexities), training_step)
             # mlflow.log_metric('validation/perplexityste', np.std(book_perplexities)/np.sqrt(len(book_perplexities)), training_step)
@@ -840,8 +840,7 @@ class Trainer:
         # make sure to reset model params
         self.model.load_state_dict(original_model)
 
-        return np.mean(book_perplexities)
-
+        return -1
     def predict(self, test_dataset: Dataset) -> PredictionOutput:
         """
         Run prediction and return predictions and potential metrics.
