@@ -726,7 +726,7 @@ class Trainer:
                 - the potential metrics computed from the predictions
         """
         self.model.train()
-        eval_here = [1, 2, 3, 4, 5, 10, 25, 50, 100, 500]
+        eval_here = [1, 5, 10, 25, 50, 100, 250, 500, 750, 1000]
         book_perplexities = {}
         book_perplexities['train'] = {}
         book_perplexities['test'] = {}
@@ -822,7 +822,7 @@ class Trainer:
                             step_loss = outputs[0].mean()
                             this_book_losses.append(step_loss.item())
                         book_perplexities['test'][eval_step].append(np.mean(this_book_losses))
-                    if eval_step >= 501:  # self.finetune_epochs:
+                    if eval_step >= 1001:  # self.finetune_epochs:
                         done = True
                         break
 
