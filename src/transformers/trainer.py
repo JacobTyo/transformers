@@ -251,7 +251,11 @@ class Trainer:
             batch_size=self.args.train_batch_size,
             sampler=train_sampler,
             collate_fn=self.data_collator.collate_batch,
-        )
+        ) if self.args.meta == 'none' else DataLoader(
+            self.train_dataset,
+            batch_size=self.args.train_batch_size,
+            sampler=train_sampler
+        )  # TODO: I am really not sure what the difference is here.
 
         return data_loader
 
@@ -495,22 +499,22 @@ class Trainer:
                         xm.optimizer_step(optimizer)
                     else:
                         # check to make sure the model is updating
-                        print("=========Pre Step=======================================")
-                        c = 0
-                        for n, param in model.named_parameters():
-                            if c > 3:
-                                break
-                            c += 1
-                            print(n, param)
+                        # print("=========Pre Step=======================================")
+                        # c = 0
+                        # for n, param in model.named_parameters():
+                        #     if c > 3:
+                        #         break
+                        #     c += 1
+                        #     print(n, param)
                         optimizer.step()
-                        print("-----------Taking Step----------------------------------")
-                        c = 0
-                        for n, param in model.named_parameters():
-                            if c > 3:
-                                break
-                            c += 1
-                            print(n, param)
-                        print("==========Post Step=====================================")
+                        # print("-----------Taking Step----------------------------------")
+                        # c = 0
+                        # for n, param in model.named_parameters():
+                        #     if c > 3:
+                        #         break
+                        #     c += 1
+                        #     print(n, param)
+                        # print("==========Post Step=====================================")
 
                     scheduler.step()
                     model.zero_grad()
@@ -864,86 +868,86 @@ class MetaTrainer(Trainer):
         super().__init__(model, args, data_collator, train_dataset, eval_dataset, compute_metrics,
                          prediction_loss_only, tb_writer, optimizers)
 
-    def _training_step(
-        self, model: nn.Module, inputs: BookDataset, optimizer: torch.optim.Optimizer
-    ) -> float:
-        # TODO: This is the training step for a typical model, we need to modify this to be a meta-training algo.
-        # Reptile or FOMAML will be the best first options.
-        '''
-        So here is what I can do:
-        leave trainier the same, and in this case we can think of the gradient accumulation steps as the meta-batch
-        size. So in the outer step, we will sample a task (i.e. a book), and then pass this into the training_step.
-        In the training step, we will duplicate the model parameters, then update the original parameters,
-        sample another datapoint, then calculate the gradient of this, and then assign this gradient to the original
-        model parameters.
-
-        So what does this look like with multiple inner steps? With multiple inner steps, we simply repeat the
-        "sample another datapoint, calculate the gradient of this" multiple times.
-
-        Exactly what the mechanism of duplicating, updating, and assigning gradients to parameters is, I'm not sure.
-        '''
-        model.train()
-        original_parameters = model.state_dict().copy()
-        # I need to build a dataloader for the input bookdataset
-        this_sampler = RandomSampler(inputs)
-        this_loader = DataLoader(inputs,
-                                 batch_size=self.args.train_batch_size,
-                                 sampler=this_sampler,
-                                 collate_fn=self.data_collator.collate_batch)
-
-        for inner_step, data_points in enumerate(this_loader):
-            for k, v in data_points.items():
-                data_points[k] = v.to(self.args.device)
-
-            outputs = model(**data_points)
-            loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
-
-            if self.args.n_gpu > 1:
-                loss = loss.mean()  # mean() to average on multi-gpu parallel training
-            if self.args.gradient_accumulation_steps > 1:
-                loss = loss / self.args.gradient_accumulation_steps
-
-            if self.args.fp16:
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
-            else:
-                loss.backward()
-
-            if inner_step >= self.args.num_inner_steps:
-                break
-
-            optimizer.step()
-            model.zero_grad()
-
-        # for testing, pring first 3 parameters
-        # get the last gradients from the updated model
-        grads = {}
-        for n, param in model.named_parameters():
-            grads[n] = param.grad
-        # make sure the model is as it was before the training step
-        model.load_state_dict(original_parameters)
-        # now load last gradients back into model
-        for n, param in model.named_parameters():
-            param.grad = grads[n]
-
-        return loss.item()
-
-
-    def evaluate(
-        self, eval_dataset: Optional[Dataset] = None, prediction_loss_only: Optional[bool] = None,
-    ) -> Dict[str, float]:
-        # TODO: fix this
-        raise NotImplementedError
-
-    def predict(self, test_dataset: Dataset) -> PredictionOutput:
-        # TODO: unclear, does this need updated?
-        raise NotImplementedError
-
-    def _prediction_loop(
-        self, dataloader: DataLoader, description: str, prediction_loss_only: Optional[bool] = None
-    ) -> PredictionOutput:
-        # TODO: unclear, does this need updated?
-        raise NotImplementedError
+    # def _training_step(
+    #     self, model: nn.Module, inputs: BookDataset, optimizer: torch.optim.Optimizer
+    # ) -> float:
+    #     # TODO: This is the training step for a typical model, we need to modify this to be a meta-training algo.
+    #     # Reptile or FOMAML will be the best first options.
+    #     '''
+    #     So here is what I can do:
+    #     leave trainier the same, and in this case we can think of the gradient accumulation steps as the meta-batch
+    #     size. So in the outer step, we will sample a task (i.e. a book), and then pass this into the training_step.
+    #     In the training step, we will duplicate the model parameters, then update the original parameters,
+    #     sample another datapoint, then calculate the gradient of this, and then assign this gradient to the original
+    #     model parameters.
+    #
+    #     So what does this look like with multiple inner steps? With multiple inner steps, we simply repeat the
+    #     "sample another datapoint, calculate the gradient of this" multiple times.
+    #
+    #     Exactly what the mechanism of duplicating, updating, and assigning gradients to parameters is, I'm not sure.
+    #     '''
+    #     model.train()
+    #     original_parameters = model.state_dict().copy()
+    #     # I need to build a dataloader for the input bookdataset
+    #     this_sampler = RandomSampler(inputs)
+    #     this_loader = DataLoader(inputs,
+    #                              batch_size=self.args.train_batch_size,
+    #                              sampler=this_sampler,
+    #                              collate_fn=self.data_collator.collate_batch)
+    #
+    #     for inner_step, data_points in enumerate(this_loader):
+    #         for k, v in data_points.items():
+    #             data_points[k] = v.to(self.args.device)
+    #
+    #         outputs = model(**data_points)
+    #         loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
+    #
+    #         if self.args.n_gpu > 1:
+    #             loss = loss.mean()  # mean() to average on multi-gpu parallel training
+    #         if self.args.gradient_accumulation_steps > 1:
+    #             loss = loss / self.args.gradient_accumulation_steps
+    #
+    #         if self.args.fp16:
+    #             with amp.scale_loss(loss, optimizer) as scaled_loss:
+    #                 scaled_loss.backward()
+    #         else:
+    #             loss.backward()
+    #
+    #         if inner_step >= self.args.num_inner_steps:
+    #             break
+    #
+    #         optimizer.step()
+    #         model.zero_grad()
+    #
+    #     # for testing, pring first 3 parameters
+    #     # get the last gradients from the updated model
+    #     grads = {}
+    #     for n, param in model.named_parameters():
+    #         grads[n] = param.grad
+    #     # make sure the model is as it was before the training step
+    #     model.load_state_dict(original_parameters)
+    #     # now load last gradients back into model
+    #     for n, param in model.named_parameters():
+    #         param.grad = grads[n]
+    #
+    #     return loss.item()
+    #
+    #
+    # def evaluate(
+    #     self, eval_dataset: Optional[Dataset] = None, prediction_loss_only: Optional[bool] = None,
+    # ) -> Dict[str, float]:
+    #     # TODO: fix this
+    #     raise NotImplementedError
+    #
+    # def predict(self, test_dataset: Dataset) -> PredictionOutput:
+    #     # TODO: unclear, does this need updated?
+    #     raise NotImplementedError
+    #
+    # def _prediction_loop(
+    #     self, dataloader: DataLoader, description: str, prediction_loss_only: Optional[bool] = None
+    # ) -> PredictionOutput:
+    #     # TODO: unclear, does this need updated?
+    #     raise NotImplementedError
 
 
 

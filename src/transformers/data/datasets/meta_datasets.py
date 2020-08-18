@@ -133,7 +133,17 @@ class GutenburgDataset(Dataset):
         return len(self.books)
 
     def __getitem__(self, i) -> Dataset:
+        '''
+        In this function, we must randomly sample 2 books. then return something in the form of.
 
+        we need to build a book dataset for each of the concerned books,
+        and then serve a batch of samples.
+        Args:
+            i:
+
+        Returns:
+
+        '''
         if self.eval:
             metatrain = BookDataset(
                 tokenizer=self.tokenizer,

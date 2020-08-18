@@ -149,7 +149,7 @@ class DataTrainingArguments:
 
 def get_dataset(args: DataTrainingArguments, tokenizer: PreTrainedTokenizer, evaluate=False, local_rank=-1):
     file_path = args.eval_data_file if evaluate else args.train_data_file
-    if args.meta == "none":
+    if args.meta == "none" and not evaluate:
         return TextDataset(
             tokenizer=tokenizer, file_path=file_path, block_size=args.block_size
         )#,train_batch_size=training_args.per_gpu_train_batch_size * training_args.n_gpu
@@ -163,6 +163,9 @@ def main(model_args, data_args, training_args):
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns
+
+    # For now, just make meta-variable available in training_args
+    training_args.meta = data_args.meta
 
     if data_args.eval_data_file is None and training_args.do_eval:
         raise ValueError(
