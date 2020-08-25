@@ -38,6 +38,7 @@ from transformers import (
     AutoModelWithLMHead,
     AutoTokenizer,
     DataCollatorForLanguageModeling,
+    DataCollatorForMetaLanguageModeling,
     HfArgumentParser,
     LineByLineTextDataset,
     PreTrainedTokenizer,
@@ -166,6 +167,7 @@ def main(model_args, data_args, training_args):
 
     # For now, just make meta-variable available in training_args
     training_args.meta = data_args.meta
+    training_args.num_inner_steps = data_args.num_inner_steps
 
     if data_args.eval_data_file is None and training_args.do_eval:
         raise ValueError(
@@ -262,18 +264,20 @@ def main(model_args, data_args, training_args):
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer, mlm=data_args.mlm, mlm_probability=data_args.mlm_probability
     )
+    if data_args.meta != 'none':
+        outer_collator = DataCollatorForMetaLanguageModeling()
+
 
     # Initialize our Trainer
     trainer = MetaTrainer(
         model=model,
         args=training_args,
-        data_collator=data_collator,
+        data_collator=outer_collator if training_args.meta != 'none' else data_collator,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         prediction_loss_only=True,
-        # finetune_epochs=data_args.finetune_epochs,
-        # num_inner_steps=data_args.num_inner_steps,
-        # first_order=data_args.first_order,
+        inner_collator=data_collator,
+        logger=logger,
     )
 
     # Training
@@ -286,11 +290,13 @@ def main(model_args, data_args, training_args):
         train_output = trainer.train(model_path=model_path)
 
         # this logging is questionable
-        logger.log_train(0, train_output.training_loss)
-        logger.save_model(trainer.model, os.path.join(training_args.output_dir, 'tmp.torchmodel'),
+        logger.save_model(trainer.model,
+                          trainer.optimizers,
+                          os.path.join(training_args.output_dir, 'model-' + str(train_output.global_step) + '.mdl'),
                           train_output.training_loss)
 
         trainer.save_model()
+        # TODO: do I need to save the tokenizer as well?
         tokenizer.save_pretrained(training_args.output_dir)
 
     # Evaluation
@@ -315,15 +321,15 @@ if __name__ == "__main__":
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
-    # mlflow.set_tracking_uri('http://gs18196.sp.cs.cmu.edu:6460')
-    # mlflow.set_experiment("MetaLanguageModels")
-    # with mlflow.start_run(run_name=data_args.run_name):
-    all_args = {}
-    for d in [model_args, data_args, training_args]:
-        for key, val in vars(d).items():
-            all_args[key] = val
+    mlflow.set_tracking_uri('http://gs18196.sp.cs.cmu.edu:6460')
+    mlflow.set_experiment("MetaLMs")
+    with mlflow.start_run(run_name=data_args.run_name):
+        all_args = {}
+        for d in [model_args, data_args, training_args]:
+            for key, val in vars(d).items():
+                all_args[key] = val
 
-    logger = Logger(__name__, all_args)
-    # print(mlflow.get_tracking_uri())
-    # print(mlflow.get_artifact_uri())
-    main(model_args, data_args, training_args)
+        logger = Logger(__name__, all_args)
+        # print(mlflow.get_tracking_uri())
+        # print(mlflow.get_artifact_uri())
+        main(model_args, data_args, training_args)

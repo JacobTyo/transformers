@@ -5,10 +5,16 @@ import time
 import torch
 from torch.utils.data.dataset import Dataset
 from transformers.tokenization_utils import PreTrainedTokenizer
+from torch.utils.data import Sampler
 
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+# TODO: I think I need to build a gutenburg and a bookdataset sampler and collator_fn
+
+
 
 
 class BookDataset(Dataset):
@@ -38,19 +44,19 @@ class BookDataset(Dataset):
             start = time.time()
             with open(cached_features_file, "rb") as handle:
                 self.examples = pickle.load(handle)
-            logger.info(
+            logger.debug(
                 f"Loading features from cached file {cached_features_file} [took %.3f s]", time.time() - start
             )
 
         else:
-            logger.info(f"Creating features from dataset file at {directory}")
+            logger.debug(f"Creating features from dataset file at {directory}")
 
             self.examples = []
             # TODO: I should not need the errors here, clean data more to ensure this is fixed.
             with open(file_path, encoding="utf-8", errors="replace") as f:
                 text = f.read()
 
-            logger.info(f"Tokenizing dataset file")
+            logger.debug(f"Tokenizing dataset file")
 
             tokenized_text = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(text))
 
@@ -71,12 +77,12 @@ class BookDataset(Dataset):
             if n != 0:
                 self.examples = self.examples[:-n]
 
-            logger.info(f"The number of examples for this dataset file is: {len(self.examples)}")
+            logger.debug(f"The number of examples for this dataset file is: {len(self.examples)}")
 
             start = time.time()
             with open(cached_features_file, "wb") as handle:
                 pickle.dump(self.examples, handle, protocol=pickle.HIGHEST_PROTOCOL)
-            logger.info(
+            logger.debug(
                 f"Saving features into cached file %s [took %.3f s]", cached_features_file, time.time() - start
             )
 
@@ -84,24 +90,10 @@ class BookDataset(Dataset):
         return len(self.examples)
 
     def __getitem__(self, i) -> torch.Tensor:
-        # now just need to serve a meta-train and meta-test version of this
-        # if i + 1 < self.__len__():
-        #     metatest = torch.tensor(self.examples[i + 1], dtype=torch.long)
-        #     metatestlbl = torch.tensor(self.examples[i + 1], dtype=torch.long)
-        # else:
-        #     metatest = torch.tensor(self.examples[0], dtype=torch.long)
-        #     metatestlbl = torch.tensor(self.examples[0], dtype=torch.long)
-        # returnme = {
-        #     "metatrain": {
-        #         'input_ids': torch.tensor(self.examples[i], dtype=torch.long),
-        #         'labels': torch.tensor(self.examples[i], dtype=torch.long)
-        #     },
-        #     "metatest": {
-        #         'input_ids': metatest,
-        #         'labels': metatestlbl
-        #     }
-        # }
         return torch.tensor(self.examples[i], dtype=torch.long)
+
+    def size(self, i) -> int:
+        return len(self.examples)
 
 
 class GutenburgDataset(Dataset):
@@ -134,16 +126,13 @@ class GutenburgDataset(Dataset):
 
     def __getitem__(self, i) -> Dataset:
         '''
-        In this function, we must randomly sample 2 books. then return something in the form of.
-
-        we need to build a book dataset for each of the concerned books,
-        and then serve a batch of samples.
         Args:
             i:
 
         Returns:
 
         '''
+        # I Don't think I need this - or maybe I do but just for eval as is noted.
         if self.eval:
             metatrain = BookDataset(
                 tokenizer=self.tokenizer,
@@ -172,3 +161,25 @@ class GutenburgDataset(Dataset):
                 train_batch_size=self.train_batch_size
             )
             return bookdataset
+
+
+# class GutenburgSampler(Sampler):
+#     r"""
+#
+#     """
+#
+#     def __init__(self, data_source):
+#         assert isinstance(data_source, GutenburgDataset), 'This sampler can only be used with a Gutenburg Dataset'
+#
+#         self.data_source = data_source
+#
+#     @property
+#     def num_samples(self):
+#         return len(self.data_source)
+#
+#     def __iter__(self):
+#         n = len(self.data_source)
+#         return iter(torch.randperm(n, generator=self.generator).tolist())
+#
+#     def __len__(self):
+#         return self.num_samples

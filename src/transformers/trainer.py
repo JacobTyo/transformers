@@ -1,5 +1,5 @@
 import json
-import logging
+# import logging
 import math
 import os
 import random
@@ -20,12 +20,12 @@ from torch.utils.data.sampler import RandomSampler, Sampler, SequentialSampler
 from tqdm.auto import tqdm, trange
 
 from .data.datasets.meta_datasets import BookDataset
-from .data.data_collator import DataCollator, DefaultDataCollator
+from .data.data_collator import DataCollator, DefaultDataCollator, DataCollatorForMetaLanguageModeling
 from .modeling_utils import PreTrainedModel
 from .optimization import AdamW, get_linear_schedule_with_warmup
 from .trainer_utils import PREFIX_CHECKPOINT_DIR, EvalPrediction, PredictionOutput, TrainOutput
 from .training_args import TrainingArguments, is_tpu_available
-
+from .data import Logger
 
 try:
     from apex import amp
@@ -84,7 +84,8 @@ def is_wandb_available():
     return _has_wandb
 
 
-logger = logging.getLogger(__name__)
+# logging.setLoggerClass(Logger)
+# logger = logging.getLogger(__name__)
 
 
 def set_seed(seed: int):
@@ -186,6 +187,8 @@ class Trainer:
         prediction_loss_only=False,
         tb_writer: Optional["SummaryWriter"] = None,
         optimizers: Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = None,
+        logger: Logger = None,
+
     ):
         """
         Trainer is a simple but feature-complete training and eval loop for PyTorch,
@@ -197,10 +200,14 @@ class Trainer:
         """
         self.model = model.to(args.device)
         self.args = args
+        self.logger = logger
         if data_collator is not None:
             self.data_collator = data_collator
+        elif self.args.meta != 'none':
+            self.data_collator = DataCollatorForMetaLanguageModeling()
         else:
             self.data_collator = DefaultDataCollator()
+
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
         self.compute_metrics = compute_metrics
@@ -211,13 +218,13 @@ class Trainer:
         elif is_tensorboard_available() and self.is_world_master():
             self.tb_writer = SummaryWriter(log_dir=self.args.logging_dir)
         if not is_tensorboard_available():
-            logger.warning(
+            self.logger.warning(
                 "You are instantiating a Trainer but Tensorboard is not installed. You should consider installing it."
             )
         if is_wandb_available():
             self._setup_wandb()
         else:
-            logger.info(
+            self.logger.info(
                 "You are instantiating a Trainer but W&B is not installed. To use wandb logging, "
                 "run `pip install wandb; wandb login` see https://docs.wandb.com/huggingface."
             )
@@ -242,20 +249,12 @@ class Trainer:
                 else DistributedSampler(self.train_dataset)
             )
 
-        # TODO: we need to use a different collate_fn, or change how the dataset is served for this to work.
-        #  We may be able to set the batch_size to 1 (i.e. the meta-batch size) to prevent this problem,
-        #  but seems like a bad idea.
-
         data_loader = DataLoader(
             self.train_dataset,
             batch_size=self.args.train_batch_size,
             sampler=train_sampler,
             collate_fn=self.data_collator.collate_batch,
-        ) if self.args.meta == 'none' else DataLoader(
-            self.train_dataset,
-            batch_size=self.args.train_batch_size,
-            sampler=train_sampler
-        )  # TODO: I am really not sure what the difference is here.
+        )
 
         return data_loader
 
@@ -349,7 +348,7 @@ class Trainer:
             WANDB_DISABLED:
                 (Optional): boolean - defaults to false, set to "true" to disable wandb entirely
         """
-        logger.info('Automatic Weights & Biases logging enabled, to disable set os.environ["WANDB_DISABLED"] = "true"')
+        self.logger.info('Automatic Weights & Biases logging enabled, to disable set os.environ["WANDB_DISABLED"] = "true"')
         wandb.init(project=os.getenv("WANDB_PROJECT", "huggingface"), config=vars(self.args))
         # keep track of model topology and gradients
         if os.getenv("WANDB_WATCH") != "false":
@@ -428,13 +427,13 @@ class Trainer:
                 * self.args.gradient_accumulation_steps
                 * (torch.distributed.get_world_size() if self.args.local_rank != -1 else 1)
             )
-        logger.info("***** Running training *****")
-        logger.info("  Num examples = %d", self.num_examples(train_dataloader))
-        logger.info("  Num Epochs = %d", num_train_epochs)
-        logger.info("  Instantaneous batch size per device = %d", self.args.per_gpu_train_batch_size)
-        logger.info("  Total train batch size (w. parallel, distributed & accumulation) = %d", total_train_batch_size)
-        logger.info("  Gradient Accumulation steps = %d", self.args.gradient_accumulation_steps)
-        logger.info("  Total optimization steps = %d", t_total)
+        self.logger.info("***** Running training *****")
+        self.logger.info("  Num examples = %d", self.num_examples(train_dataloader))
+        self.logger.info("  Num Epochs = %d", num_train_epochs)
+        self.logger.info("  Instantaneous batch size per device = %d", self.args.per_gpu_train_batch_size)
+        self.logger.info("  Total train batch size (w. parallel, distributed & accumulation) = %d", total_train_batch_size)
+        self.logger.info("  Gradient Accumulation steps = %d", self.args.gradient_accumulation_steps)
+        self.logger.info("  Total optimization steps = %d", t_total)
 
         self.global_step = 0
         self.epoch = 0
@@ -450,13 +449,13 @@ class Trainer:
                     len(train_dataloader) // self.args.gradient_accumulation_steps
                 )
 
-                logger.info("  Continuing training from checkpoint, will skip to saved global_step")
-                logger.info("  Continuing training from epoch %d", epochs_trained)
-                logger.info("  Continuing training from global step %d", self.global_step)
-                logger.info("  Will skip the first %d steps in the first epoch", steps_trained_in_current_epoch)
+                self.logger.info("  Continuing training from checkpoint, will skip to saved global_step")
+                self.logger.info("  Continuing training from epoch %d", epochs_trained)
+                self.logger.info("  Continuing training from global step %d", self.global_step)
+                self.logger.info("  Will skip the first %d steps in the first epoch", steps_trained_in_current_epoch)
             except ValueError:
                 self.global_step = 0
-                logger.info("  Starting fine-tuning.")
+                self.logger.info("  Starting fine-tuning.")
 
         tr_loss = 0.0
         logging_loss = 0.0
@@ -498,23 +497,8 @@ class Trainer:
                     if is_tpu_available():
                         xm.optimizer_step(optimizer)
                     else:
-                        # check to make sure the model is updating
-                        # print("=========Pre Step=======================================")
-                        # c = 0
-                        # for n, param in model.named_parameters():
-                        #     if c > 3:
-                        #         break
-                        #     c += 1
-                        #     print(n, param)
+                        # This serves as the meta-update for the meta trainer
                         optimizer.step()
-                        # print("-----------Taking Step----------------------------------")
-                        # c = 0
-                        # for n, param in model.named_parameters():
-                        #     if c > 3:
-                        #         break
-                        #     c += 1
-                        #     print(n, param)
-                        # print("==========Post Step=====================================")
 
                     scheduler.step()
                     model.zero_grad()
@@ -575,7 +559,7 @@ class Trainer:
         if self.tb_writer:
             self.tb_writer.close()
 
-        logger.info("\n\nTraining completed. Do not forget to share your model on huggingface.co/models =)\n\n")
+        self.logger.info("\n\nTraining completed. Do not forget to share your model on huggingface.co/models =)\n\n")
         return TrainOutput(self.global_step, tr_loss / self.global_step)
 
     def _log(self, logs: Dict[str, float], iterator: Optional[tqdm] = None) -> None:
@@ -593,7 +577,7 @@ class Trainer:
             print(output)
 
     def _training_step(
-        self, model: nn.Module, inputs: Dict[str, torch.Tensor], optimizer: torch.optim.Optimizer
+        self, model: nn.Module, inputs: Dict[str, torch.Tensor], optimizer: torch.optim.Optimizer, step: Optional[int] = 0,
     ) -> float:
         model.train()
         for k, v in inputs.items():
@@ -613,7 +597,10 @@ class Trainer:
         else:
             loss.backward()
 
-        return loss.item()
+        this_loss = loss.item()
+        self.logger.log_train(step, this_loss)
+
+        return this_loss
 
     def is_local_master(self) -> bool:
         if is_tpu_available():
@@ -646,7 +633,7 @@ class Trainer:
 
     def _save_tpu(self, output_dir: Optional[str] = None):
         output_dir = output_dir if output_dir is not None else self.args.output_dir
-        logger.info("Saving model checkpoint to %s", output_dir)
+        self.logger.info("Saving model checkpoint to %s", output_dir)
 
         if xm.is_master_ordinal():
             os.makedirs(output_dir, exist_ok=True)
@@ -663,7 +650,7 @@ class Trainer:
     def _save(self, output_dir: Optional[str] = None):
         output_dir = output_dir if output_dir is not None else self.args.output_dir
         os.makedirs(output_dir, exist_ok=True)
-        logger.info("Saving model checkpoint to %s", output_dir)
+        self.logger.info("Saving model checkpoint to %s", output_dir)
         # Save a trained model and configuration using `save_pretrained()`.
         # They can then be reloaded using `from_pretrained()`
         if not isinstance(self.model, PreTrainedModel):
@@ -702,7 +689,7 @@ class Trainer:
         number_of_checkpoints_to_delete = max(0, len(checkpoints_sorted) - self.args.save_total_limit)
         checkpoints_to_be_deleted = checkpoints_sorted[:number_of_checkpoints_to_delete]
         for checkpoint in checkpoints_to_be_deleted:
-            logger.info("Deleting older checkpoint [{}] due to args.save_total_limit".format(checkpoint))
+            self.logger.info("Deleting older checkpoint [{}] due to args.save_total_limit".format(checkpoint))
             shutil.rmtree(checkpoint)
 
     def evaluate(
@@ -722,6 +709,8 @@ class Trainer:
                 - the eval loss
                 - the potential metrics computed from the predictions
         """
+        # TODO: this is the generic evaluation method.  I will modify this to my own purposes,
+        #  And then just like in the training example,I'll use the _prediction loop to cover any differences
         eval_dataloader = self.get_eval_dataloader(eval_dataset)
 
         output = self._prediction_loop(eval_dataloader, description="Evaluation")
@@ -766,9 +755,9 @@ class Trainer:
         # inside a DistributedDataParallel as we'll be under `no_grad` anyways.
 
         batch_size = dataloader.batch_size
-        logger.info("***** Running %s *****", description)
-        logger.info("  Num examples = %d", self.num_examples(dataloader))
-        logger.info("  Batch size = %d", batch_size)
+        self.logger.info("***** Running %s *****", description)
+        self.logger.info("  Num examples = %d", self.num_examples(dataloader))
+        self.logger.info("  Batch size = %d", batch_size)
         eval_losses: List[float] = []
         preds: torch.Tensor = None
         label_ids: torch.Tensor = None
@@ -861,93 +850,375 @@ class MetaTrainer(Trainer):
             prediction_loss_only=False,
             tb_writer: Optional["SummaryWriter"] = None,
             optimizers: Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = None,
+            inner_collator: Optional[DataCollator] = None,
+            logger: Logger = None,
     ):
         """
         MetaTrainer extends the transformer trainer, to allow for meta-capabilities (but only first-order at this point)
         """
         super().__init__(model, args, data_collator, train_dataset, eval_dataset, compute_metrics,
-                         prediction_loss_only, tb_writer, optimizers)
+                         prediction_loss_only, tb_writer, optimizers, logger)
+        self.inner_collator = inner_collator
+        self.eval_collator = inner_collator if inner_collator is not None else data_collator
 
-    # def _training_step(
-    #     self, model: nn.Module, inputs: BookDataset, optimizer: torch.optim.Optimizer
-    # ) -> float:
-    #     # TODO: This is the training step for a typical model, we need to modify this to be a meta-training algo.
-    #     # Reptile or FOMAML will be the best first options.
-    #     '''
-    #     So here is what I can do:
-    #     leave trainier the same, and in this case we can think of the gradient accumulation steps as the meta-batch
-    #     size. So in the outer step, we will sample a task (i.e. a book), and then pass this into the training_step.
-    #     In the training step, we will duplicate the model parameters, then update the original parameters,
-    #     sample another datapoint, then calculate the gradient of this, and then assign this gradient to the original
-    #     model parameters.
-    #
-    #     So what does this look like with multiple inner steps? With multiple inner steps, we simply repeat the
-    #     "sample another datapoint, calculate the gradient of this" multiple times.
-    #
-    #     Exactly what the mechanism of duplicating, updating, and assigning gradients to parameters is, I'm not sure.
-    #     '''
-    #     model.train()
-    #     original_parameters = model.state_dict().copy()
-    #     # I need to build a dataloader for the input bookdataset
-    #     this_sampler = RandomSampler(inputs)
-    #     this_loader = DataLoader(inputs,
-    #                              batch_size=self.args.train_batch_size,
-    #                              sampler=this_sampler,
-    #                              collate_fn=self.data_collator.collate_batch)
-    #
-    #     for inner_step, data_points in enumerate(this_loader):
-    #         for k, v in data_points.items():
-    #             data_points[k] = v.to(self.args.device)
-    #
-    #         outputs = model(**data_points)
-    #         loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
-    #
-    #         if self.args.n_gpu > 1:
-    #             loss = loss.mean()  # mean() to average on multi-gpu parallel training
-    #         if self.args.gradient_accumulation_steps > 1:
-    #             loss = loss / self.args.gradient_accumulation_steps
-    #
-    #         if self.args.fp16:
-    #             with amp.scale_loss(loss, optimizer) as scaled_loss:
-    #                 scaled_loss.backward()
-    #         else:
-    #             loss.backward()
-    #
-    #         if inner_step >= self.args.num_inner_steps:
-    #             break
-    #
-    #         optimizer.step()
-    #         model.zero_grad()
-    #
-    #     # for testing, pring first 3 parameters
-    #     # get the last gradients from the updated model
-    #     grads = {}
-    #     for n, param in model.named_parameters():
-    #         grads[n] = param.grad
-    #     # make sure the model is as it was before the training step
-    #     model.load_state_dict(original_parameters)
-    #     # now load last gradients back into model
-    #     for n, param in model.named_parameters():
-    #         param.grad = grads[n]
-    #
-    #     return loss.item()
-    #
-    #
-    # def evaluate(
-    #     self, eval_dataset: Optional[Dataset] = None, prediction_loss_only: Optional[bool] = None,
-    # ) -> Dict[str, float]:
-    #     # TODO: fix this
-    #     raise NotImplementedError
-    #
-    # def predict(self, test_dataset: Dataset) -> PredictionOutput:
-    #     # TODO: unclear, does this need updated?
-    #     raise NotImplementedError
-    #
-    # def _prediction_loop(
-    #     self, dataloader: DataLoader, description: str, prediction_loss_only: Optional[bool] = None
-    # ) -> PredictionOutput:
-    #     # TODO: unclear, does this need updated?
-    #     raise NotImplementedError
+    def _training_step(
+        self, model: nn.Module, inputs: BookDataset, optimizer: torch.optim.Optimizer, step: Optional[int] = 0
+    ) -> float:
+        if self.args.meta == 'fomaml':
+            return self._fomaml_training_step(model, inputs, optimizer, step)
+        elif self.args.meta == 'none':
+            # TODO: this is kinda a problem, how do I make this call the super method?
+            #  seems this is bad practice - NEEDS TESTED!!
+            return super(MetaTrainer, self)._training_step(model, inputs, optimizer)
+        else:
+            raise NotImplementedError('the requested meta-learning method is not implemented.')
+
+    def _fomaml_training_step(
+            self, model: nn.Module, inputs: BookDataset, optimizer: torch.optim.Optimizer, step: Optional[int] = 0
+    ) -> float:
+        '''
+        So here is what I can do:
+        leave trainier the same, and in this case we can think of the gradient accumulation steps as the meta-batch
+        size. So in the outer step, we will sample a task (i.e. a book), and then pass this into the training_step.
+        In the training step, we will duplicate the model parameters, then update the original parameters,
+        sample another datapoint, then calculate the gradient of this, and then assign this gradient to the original
+        model parameters.
+
+        So what does this look like with multiple inner steps? With multiple inner steps, we simply repeat the
+        "sample another datapoint, calculate the gradient of this" multiple times.
+
+        Exactly what the mechanism of duplicating, updating, and assigning gradients to parameters is, I'm not sure.
+        '''
+        model.train()
+        # inputs is a list of book datasets, so I should just train a model for each of those, given a few steps
+        original_parameters = model.state_dict().copy()
+        gradients = {}
+        outer_loss = 0
+        for booknum, bookdset in enumerate(inputs):
+            # build a dataloader for the current book dataset
+            this_sampler = RandomSampler(bookdset)
+            this_loader = DataLoader(bookdset,
+                                     batch_size=self.args.train_batch_size,
+                                     sampler=this_sampler,
+                                     collate_fn=self.inner_collator.collate_batch)
+            # now, train on this book
+            stop_next_iter = False
+            for inner_step, book_data in enumerate(this_loader):
+                # for this book, update and then train and shit
+                for k, v in book_data.items():
+                    book_data[k] = v.to(self.args.device)
+
+                outputs = model(**book_data)
+                loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
+
+                if self.args.n_gpu > 1:
+                    loss = loss.mean()  # mean() to average on multi-gpu parallel training
+                if self.args.gradient_accumulation_steps > 1:
+                    loss = loss / self.args.gradient_accumulation_steps
+
+                if self.args.fp16:
+                    with amp.scale_loss(loss, optimizer) as scaled_loss:
+                        scaled_loss.backward()
+                else:
+                    loss.backward()
+
+                if stop_next_iter:
+                    # save the gradients somehow?
+                    outer_loss += loss.item()
+                    gradients[booknum] = []
+                    for param in model.parameters():
+                        # TODO: do I need a detach here or anything?
+                        gradients[booknum].append(param.grad)
+                    # and finally reset the model to the original parameters
+                    # TODO: this copy may be bad
+                    model.load_state_dict(original_parameters.copy())
+                    break
+
+                optimizer.step()
+                model.zero_grad()
+
+                if inner_step >= self.args.num_inner_steps:
+                    # we are finished training this model, so we need to take one more step
+                    # (I think, and just save the gradient)
+                    stop_next_iter = True
+
+        # Now, take the meta step, which is the sum of all of the gradients in the gradients dictionary
+        meta_gradient = np.zeros_like(gradients[0])
+        for v in gradients.values():
+            meta_gradient += v
+
+        # Record outer_loss for this step
+        self.logger.log_outer(step, outer_loss)
+
+        # apply the meta_gradient to the network
+        for p, g in zip(model.parameters(), meta_gradient):
+            p.grad = g
+
+        return loss.item()
+
+    def _prediction_loop(
+            self, dataloader: DataLoader, description: str, prediction_loss_only: Optional[bool] = None
+    ) -> PredictionOutput:
+        if self.args.meta == 'fomaml':
+            return self._fomaml_prediction_loop(dataloader, description, prediction_loss_only)
+        elif self.args.meta == 'none':
+            # TODO: this is kinda a problem, how do I make this call the super method?
+            #  seems this is bad practice - NEEDS TESTED!!
+            return self._standard_prediction_loop(dataloader, description, prediction_loss_only)
+        else:
+            raise NotImplementedError('the requested meta-learning method is not implemented.')
+
+    def _standard_prediction_loop(
+            self, dataloader: DataLoader, description: str, prediction_loss_only: Optional[bool] = None
+    ) -> PredictionOutput:
+        """
+        Prediction/evaluation loop, shared by `evaluate()` and `predict()`.
+
+        Works both with or without labels.
+        """
+        prediction_loss_only = prediction_loss_only if prediction_loss_only is not None else self.prediction_loss_only
+        model = self.model
+        # multi-gpu eval
+        if self.args.n_gpu > 1:
+            model = torch.nn.DataParallel(model)
+        else:
+            model = self.model
+        # Note: in torch.distributed mode, there's no point in wrapping the model
+        # inside a DistributedDataParallel as we'll be under `no_grad` anyways.
+
+        book_performances = []
+
+        batch_size = dataloader.batch_size
+        self.logger.info("***** Running %s *****", description)
+        self.logger.info("  Num examples = %d", self.num_examples(dataloader))
+        self.logger.info("  Batch size = %d", batch_size)
+
+        # model.eval()
+        if is_tpu_available():
+            dataloader = pl.ParallelLoader(dataloader, [self.args.device]).per_device_loader(self.args.device)
+
+        original_model = model.state_dict().copy()
+        model.zero_grad()
+
+        # get an optimizer if we don't have one already
+        if self.optimizers is not None:
+            optimizer, scheduler = self.optimizers
+        else:
+            optimizer, scheduler = self.get_optimizers(self.args.num_inner_steps)
+
+        # instead of using the dataloader, just use the dataset
+        for bookdset in tqdm(dataloader.dataset, desc=description):
+            # is bookdset a dict of metatrain metatest?
+            # make sure the model is set as the original paramers
+            model.train()
+
+            model.load_state_dict(original_model)
+
+            eval_losses: List[float] = []
+            preds: torch.Tensor = None
+            label_ids: torch.Tensor = None
+
+            train_sampler = RandomSampler(bookdset['metatrain'])
+            train_loader = DataLoader(bookdset['metatrain'],
+                                      batch_size=self.args.train_batch_size,
+                                      sampler=train_sampler,
+                                      collate_fn=self.inner_collator.collate_batch)
+
+            # do the fine-tuning step
+            for inner_step, book_data in enumerate(train_loader):
+                # for this book, update and then train and shit
+                if inner_step >= self.args.num_inner_steps:
+                    break
+
+                for k, v in book_data.items():
+                    book_data[k] = v.to(self.args.device)
+
+                outputs = model(**book_data)
+                loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
+
+                if self.args.n_gpu > 1:
+                    loss = loss.mean()  # mean() to average on multi-gpu parallel training
+                if self.args.gradient_accumulation_steps > 1:
+                    loss = loss / self.args.gradient_accumulation_steps
+
+                if self.args.fp16:
+                    with amp.scale_loss(loss, optimizer) as scaled_loss:
+                        scaled_loss.backward()
+                else:
+                    loss.backward()
+
+                optimizer.step()
+                model.zero_grad()
+
+            test_sampler = SequentialSampler(bookdset['metatest'])
+            test_loader = DataLoader(bookdset['metatest'],
+                                     batch_size=self.args.eval_batch_size,
+                                     sampler=test_sampler,
+                                     collate_fn=self.inner_collator.collate_batch)  # TODO: verify this eval_collator
+
+            # put model in eval mode
+            model.eval()
+
+            # now eval on the test set
+            for inputs in test_loader:
+                has_labels = any(inputs.get(k) is not None for k in ["labels", "lm_labels", "masked_lm_labels"])
+
+                for k, v in inputs.items():
+                    inputs[k] = v.to(self.args.device)
+
+                with torch.no_grad():
+                    outputs = model(**inputs)
+                    if has_labels:
+                        step_eval_loss, logits = outputs[:2]
+                        eval_losses += [step_eval_loss.mean().item()]
+                    else:
+                        logits = outputs[0]
+
+                if not prediction_loss_only:
+                    if preds is None:
+                        preds = logits.detach()
+                    else:
+                        preds = torch.cat((preds, logits.detach()), dim=0)
+                    if inputs.get("labels") is not None:
+                        if label_ids is None:
+                            label_ids = inputs["labels"].detach()
+                        else:
+                            label_ids = torch.cat((label_ids, inputs["labels"].detach()), dim=0)
+
+            if self.args.local_rank != -1:
+                # In distributed mode, concatenate all results from all nodes:
+                if preds is not None:
+                    preds = self.distributed_concat(preds, num_total_examples=self.num_examples(dataloader))
+                if label_ids is not None:
+                    label_ids = self.distributed_concat(label_ids, num_total_examples=self.num_examples(dataloader))
+            elif is_tpu_available():
+                # tpu-comment: Get all predictions and labels from all worker shards of eval dataset
+                if preds is not None:
+                    preds = xm.mesh_reduce("eval_preds", preds, torch.cat)
+                if label_ids is not None:
+                    label_ids = xm.mesh_reduce("eval_label_ids", label_ids, torch.cat)
+
+            # Finally, turn the aggregated tensors into numpy arrays.
+            if preds is not None:
+                preds = preds.cpu().numpy()
+            if label_ids is not None:
+                label_ids = label_ids.cpu().numpy()
+
+            if self.compute_metrics is not None and preds is not None and label_ids is not None:
+                metrics = self.compute_metrics(EvalPrediction(predictions=preds, label_ids=label_ids))
+            else:
+                metrics = {}
+            if len(eval_losses) > 0:
+                metrics["eval_loss"] = np.mean(eval_losses)
+
+                # Prefix all keys with eval_
+            for key in list(metrics.keys()):
+                if not key.startswith("eval_"):
+                    metrics[f"eval_{key}"] = metrics.pop(key)
+
+            book_performances.append(PredictionOutput(predictions=preds, label_ids=label_ids, metrics=metrics))
+            # now, I need so somehow transfer all of this into a performance conglomerate
+
+        all_losses = []
+        for bp in book_performances:
+            all_losses.append(bp.metrics['eval_loss'])
+        avg_loss = np.mean(all_losses)
+        std_loss = np.std(all_losses)
+        self.logger.log_eval(avg_loss, math.exp(avg_loss), self.global_step, std_loss)
+        return book_performances[-1]  # This is meaningless, meaning the _log is meaningless, just use MLFlow
+
+    def _fomaml_prediction_loop(
+            self, dataloader: DataLoader, description: str, prediction_loss_only: Optional[bool] = None
+    ) -> PredictionOutput:
+        """
+        Prediction/evaluation loop, shared by `evaluate()` and `predict()`.
+
+        Works both with or without labels.
+        """
+
+        prediction_loss_only = prediction_loss_only if prediction_loss_only is not None else self.prediction_loss_only
+        # TODO: The big difference here is that we have a meta_train step.
+        #  However, we also must remember that this sould work for a non-metalearning model as well. . .
+        #  or should it?
+        #  nah, I think we just make a none_prediction_loop.  In fact, start there.
+        model = self.model
+        # multi-gpu eval
+        if self.args.n_gpu > 1:
+            model = torch.nn.DataParallel(model)
+        else:
+            model = self.model
+        # Note: in torch.distributed mode, there's no point in wrapping the model
+        # inside a DistributedDataParallel as we'll be under `no_grad` anyways.
+
+        batch_size = dataloader.batch_size
+        self.logger.info("***** Running %s *****", description)
+        self.logger.info("  Num examples = %d", self.num_examples(dataloader))
+        self.logger.info("  Batch size = %d", batch_size)
+        eval_losses: List[float] = []
+        preds: torch.Tensor = None
+        label_ids: torch.Tensor = None
+        model.eval()
+
+        if is_tpu_available():
+            dataloader = pl.ParallelLoader(dataloader, [self.args.device]).per_device_loader(self.args.device)
+
+        for inputs in tqdm(dataloader, desc=description):
+            has_labels = any(inputs.get(k) is not None for k in ["labels", "lm_labels", "masked_lm_labels"])
+
+            for k, v in inputs.items():
+                inputs[k] = v.to(self.args.device)
+
+            with torch.no_grad():
+                outputs = model(**inputs)
+                if has_labels:
+                    step_eval_loss, logits = outputs[:2]
+                    eval_losses += [step_eval_loss.mean().item()]
+                else:
+                    logits = outputs[0]
+
+            if not prediction_loss_only:
+                if preds is None:
+                    preds = logits.detach()
+                else:
+                    preds = torch.cat((preds, logits.detach()), dim=0)
+                if inputs.get("labels") is not None:
+                    if label_ids is None:
+                        label_ids = inputs["labels"].detach()
+                    else:
+                        label_ids = torch.cat((label_ids, inputs["labels"].detach()), dim=0)
+
+        if self.args.local_rank != -1:
+            # In distributed mode, concatenate all results from all nodes:
+            if preds is not None:
+                preds = self.distributed_concat(preds, num_total_examples=self.num_examples(dataloader))
+            if label_ids is not None:
+                label_ids = self.distributed_concat(label_ids, num_total_examples=self.num_examples(dataloader))
+        elif is_tpu_available():
+            # tpu-comment: Get all predictions and labels from all worker shards of eval dataset
+            if preds is not None:
+                preds = xm.mesh_reduce("eval_preds", preds, torch.cat)
+            if label_ids is not None:
+                label_ids = xm.mesh_reduce("eval_label_ids", label_ids, torch.cat)
+
+        # Finally, turn the aggregated tensors into numpy arrays.
+        if preds is not None:
+            preds = preds.cpu().numpy()
+        if label_ids is not None:
+            label_ids = label_ids.cpu().numpy()
+
+        if self.compute_metrics is not None and preds is not None and label_ids is not None:
+            metrics = self.compute_metrics(EvalPrediction(predictions=preds, label_ids=label_ids))
+        else:
+            metrics = {}
+        if len(eval_losses) > 0:
+            metrics["eval_loss"] = np.mean(eval_losses)
+
+        # Prefix all keys with eval_
+        for key in list(metrics.keys()):
+            if not key.startswith("eval_"):
+                metrics[f"eval_{key}"] = metrics.pop(key)
+
+        return PredictionOutput(predictions=preds, label_ids=label_ids, metrics=metrics)
 
 
 

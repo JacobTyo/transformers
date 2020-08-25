@@ -6,7 +6,7 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 
 from ..tokenization_utils import PreTrainedTokenizer
-
+from .datasets.meta_datasets import BookDataset
 
 class DataCollator(ABC):
     """
@@ -74,6 +74,10 @@ class DefaultDataCollator(DataCollator):
                 batch[k] = torch.tensor([getattr(f, k) for f in features], dtype=torch.long)
         return batch
 
+@dataclass
+class DataCollatorForMetaLanguageModeling(DataCollator):
+    def collate_batch(self, features: List[InputDataClass]) -> List[BookDataset]:
+        return features
 
 @dataclass
 class DataCollatorForLanguageModeling(DataCollator):
