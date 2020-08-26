@@ -5,6 +5,7 @@ import os
 import random
 import re
 import shutil
+import copy
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -330,6 +331,7 @@ class Trainer:
         scheduler = get_linear_schedule_with_warmup(
             optimizer, num_warmup_steps=self.args.warmup_steps, num_training_steps=num_training_steps
         )
+        self.optimizers = optimizer, scheduler
         return optimizer, scheduler
 
     def _setup_wandb(self):
@@ -498,7 +500,21 @@ class Trainer:
                         xm.optimizer_step(optimizer)
                     else:
                         # This serves as the meta-update for the meta trainer
+                        # For now, keep check that model changed
+                        s = 0
+                        count = 0
+                        for param in model.parameters():
+                            s += torch.sum(param.data)
+                            if count >= 5:
+                                break
                         optimizer.step()
+                        s2 = 0
+                        count = 0
+                        for param in model.parameters():
+                            s2 += torch.sum(param.data)
+                            if count >= 5:
+                                break
+                        assert s != s2, "the model didn't appear to change"
 
                     scheduler.step()
                     model.zero_grad()
@@ -891,7 +907,8 @@ class MetaTrainer(Trainer):
         '''
         model.train()
         # inputs is a list of book datasets, so I should just train a model for each of those, given a few steps
-        original_parameters = model.state_dict().copy()
+        # TODO: I need to make these deep copies, should be good to go then
+        original_parameters = copy.deepcopy(model.state_dict())
         gradients = {}
         outer_loss = 0
         for booknum, bookdset in enumerate(inputs):
@@ -930,8 +947,7 @@ class MetaTrainer(Trainer):
                         # TODO: do I need a detach here or anything?
                         gradients[booknum].append(param.grad)
                     # and finally reset the model to the original parameters
-                    # TODO: this copy may be bad
-                    model.load_state_dict(original_parameters.copy())
+                    model.load_state_dict(copy.deepcopy(original_parameters))
                     break
 
                 optimizer.step()
@@ -959,11 +975,7 @@ class MetaTrainer(Trainer):
     def _prediction_loop(
             self, dataloader: DataLoader, description: str, prediction_loss_only: Optional[bool] = None
     ) -> PredictionOutput:
-        if self.args.meta == 'fomaml':
-            return self._fomaml_prediction_loop(dataloader, description, prediction_loss_only)
-        elif self.args.meta == 'none':
-            # TODO: this is kinda a problem, how do I make this call the super method?
-            #  seems this is bad practice - NEEDS TESTED!!
+        if self.args.meta == 'none' or self.args.meta == 'fomaml':
             return self._standard_prediction_loop(dataloader, description, prediction_loss_only)
         else:
             raise NotImplementedError('the requested meta-learning method is not implemented.')
@@ -997,14 +1009,14 @@ class MetaTrainer(Trainer):
         if is_tpu_available():
             dataloader = pl.ParallelLoader(dataloader, [self.args.device]).per_device_loader(self.args.device)
 
-        original_model = model.state_dict().copy()
+        original_model = copy.deepcopy(model.state_dict())
         model.zero_grad()
 
         # get an optimizer if we don't have one already
         if self.optimizers is not None:
             optimizer, scheduler = self.optimizers
         else:
-            optimizer, scheduler = self.get_optimizers(self.args.num_inner_steps)
+            optimizer, scheduler = self.get_optimizers(self.args.num_eval_finetune_steps)
 
         # instead of using the dataloader, just use the dataset
         for bookdset in tqdm(dataloader.dataset, desc=description):
@@ -1012,7 +1024,7 @@ class MetaTrainer(Trainer):
             # make sure the model is set as the original paramers
             model.train()
 
-            model.load_state_dict(original_model)
+            model.load_state_dict(copy.deepcopy(original_model))
 
             eval_losses: List[float] = []
             preds: torch.Tensor = None
@@ -1025,30 +1037,36 @@ class MetaTrainer(Trainer):
                                       collate_fn=self.inner_collator.collate_batch)
 
             # do the fine-tuning step
-            for inner_step, book_data in enumerate(train_loader):
-                # for this book, update and then train and shit
-                if inner_step >= self.args.num_inner_steps:
-                    break
+            inner_step_done = False
+            trained_steps = 0
+            while not inner_step_done:
+                for inner_step, book_data in enumerate(train_loader):
+                    trained_steps += 1
 
-                for k, v in book_data.items():
-                    book_data[k] = v.to(self.args.device)
+                    # for this book, update and then train and shit
+                    if trained_steps > self.args.num_eval_finetune_steps:
+                        inner_step_done = True
+                        break
 
-                outputs = model(**book_data)
-                loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
+                    for k, v in book_data.items():
+                        book_data[k] = v.to(self.args.device)
 
-                if self.args.n_gpu > 1:
-                    loss = loss.mean()  # mean() to average on multi-gpu parallel training
-                if self.args.gradient_accumulation_steps > 1:
-                    loss = loss / self.args.gradient_accumulation_steps
+                    outputs = model(**book_data)
+                    loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
 
-                if self.args.fp16:
-                    with amp.scale_loss(loss, optimizer) as scaled_loss:
-                        scaled_loss.backward()
-                else:
-                    loss.backward()
+                    if self.args.n_gpu > 1:
+                        loss = loss.mean()  # mean() to average on multi-gpu parallel training
+                    if self.args.gradient_accumulation_steps > 1:
+                        loss = loss / self.args.gradient_accumulation_steps
 
-                optimizer.step()
-                model.zero_grad()
+                    if self.args.fp16:
+                        with amp.scale_loss(loss, optimizer) as scaled_loss:
+                            scaled_loss.backward()
+                    else:
+                        loss.backward()
+
+                    optimizer.step()
+                    model.zero_grad()
 
             test_sampler = SequentialSampler(bookdset['metatest'])
             test_loader = DataLoader(bookdset['metatest'],
@@ -1108,8 +1126,10 @@ class MetaTrainer(Trainer):
                 metrics = self.compute_metrics(EvalPrediction(predictions=preds, label_ids=label_ids))
             else:
                 metrics = {}
+            np.exp(eval_losses)
             if len(eval_losses) > 0:
-                metrics["eval_loss"] = np.mean(eval_losses)
+                metrics["perplexity"] = np.mean(np.exp(eval_losses))
+                metrics["loss"] = np.mean(eval_losses)
 
                 # Prefix all keys with eval_
             for key in list(metrics.keys()):
@@ -1120,105 +1140,22 @@ class MetaTrainer(Trainer):
             # now, I need so somehow transfer all of this into a performance conglomerate
 
         all_losses = []
+        all_perplex = []
         for bp in book_performances:
             all_losses.append(bp.metrics['eval_loss'])
+            all_perplex.append(bp.metrics['eval_perplexity'])
         avg_loss = np.mean(all_losses)
         std_loss = np.std(all_losses)
-        self.logger.log_eval(avg_loss, math.exp(avg_loss), self.global_step, std_loss)
+        ste_loss = std_loss / math.sqrt(len(all_losses))
+        avg_perplex = np.mean(all_perplex)
+        std_perplex = np.std(all_perplex)
+        ste_perplex = std_perplex / math.sqrt(len(all_perplex))
+
+        # TODO: I am not tracking the list of perplexities for each book, I feel like I should, but not sure how.
+        self.logger.log_eval(avg_loss, avg_perplex, self.global_step, std_loss, std_perplex, ste_loss, ste_perplex)
+        stp = self.global_step if self.global_step is not None else 0
+        self.logger.log_json({'eval_losses': eval_losses, 'step': stp},
+                             'eval_results_' + str(stp) + '.json')
         return book_performances[-1]  # This is meaningless, meaning the _log is meaningless, just use MLFlow
-
-    def _fomaml_prediction_loop(
-            self, dataloader: DataLoader, description: str, prediction_loss_only: Optional[bool] = None
-    ) -> PredictionOutput:
-        """
-        Prediction/evaluation loop, shared by `evaluate()` and `predict()`.
-
-        Works both with or without labels.
-        """
-
-        prediction_loss_only = prediction_loss_only if prediction_loss_only is not None else self.prediction_loss_only
-        # TODO: The big difference here is that we have a meta_train step.
-        #  However, we also must remember that this sould work for a non-metalearning model as well. . .
-        #  or should it?
-        #  nah, I think we just make a none_prediction_loop.  In fact, start there.
-        model = self.model
-        # multi-gpu eval
-        if self.args.n_gpu > 1:
-            model = torch.nn.DataParallel(model)
-        else:
-            model = self.model
-        # Note: in torch.distributed mode, there's no point in wrapping the model
-        # inside a DistributedDataParallel as we'll be under `no_grad` anyways.
-
-        batch_size = dataloader.batch_size
-        self.logger.info("***** Running %s *****", description)
-        self.logger.info("  Num examples = %d", self.num_examples(dataloader))
-        self.logger.info("  Batch size = %d", batch_size)
-        eval_losses: List[float] = []
-        preds: torch.Tensor = None
-        label_ids: torch.Tensor = None
-        model.eval()
-
-        if is_tpu_available():
-            dataloader = pl.ParallelLoader(dataloader, [self.args.device]).per_device_loader(self.args.device)
-
-        for inputs in tqdm(dataloader, desc=description):
-            has_labels = any(inputs.get(k) is not None for k in ["labels", "lm_labels", "masked_lm_labels"])
-
-            for k, v in inputs.items():
-                inputs[k] = v.to(self.args.device)
-
-            with torch.no_grad():
-                outputs = model(**inputs)
-                if has_labels:
-                    step_eval_loss, logits = outputs[:2]
-                    eval_losses += [step_eval_loss.mean().item()]
-                else:
-                    logits = outputs[0]
-
-            if not prediction_loss_only:
-                if preds is None:
-                    preds = logits.detach()
-                else:
-                    preds = torch.cat((preds, logits.detach()), dim=0)
-                if inputs.get("labels") is not None:
-                    if label_ids is None:
-                        label_ids = inputs["labels"].detach()
-                    else:
-                        label_ids = torch.cat((label_ids, inputs["labels"].detach()), dim=0)
-
-        if self.args.local_rank != -1:
-            # In distributed mode, concatenate all results from all nodes:
-            if preds is not None:
-                preds = self.distributed_concat(preds, num_total_examples=self.num_examples(dataloader))
-            if label_ids is not None:
-                label_ids = self.distributed_concat(label_ids, num_total_examples=self.num_examples(dataloader))
-        elif is_tpu_available():
-            # tpu-comment: Get all predictions and labels from all worker shards of eval dataset
-            if preds is not None:
-                preds = xm.mesh_reduce("eval_preds", preds, torch.cat)
-            if label_ids is not None:
-                label_ids = xm.mesh_reduce("eval_label_ids", label_ids, torch.cat)
-
-        # Finally, turn the aggregated tensors into numpy arrays.
-        if preds is not None:
-            preds = preds.cpu().numpy()
-        if label_ids is not None:
-            label_ids = label_ids.cpu().numpy()
-
-        if self.compute_metrics is not None and preds is not None and label_ids is not None:
-            metrics = self.compute_metrics(EvalPrediction(predictions=preds, label_ids=label_ids))
-        else:
-            metrics = {}
-        if len(eval_losses) > 0:
-            metrics["eval_loss"] = np.mean(eval_losses)
-
-        # Prefix all keys with eval_
-        for key in list(metrics.keys()):
-            if not key.startswith("eval_"):
-                metrics[f"eval_{key}"] = metrics.pop(key)
-
-        return PredictionOutput(predictions=preds, label_ids=label_ids, metrics=metrics)
-
 
 

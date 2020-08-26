@@ -147,6 +147,10 @@ class DataTrainingArguments:
         default=1, metadata={"help": "the number of inner steps to take for meta-learning"}
     )
 
+    num_eval_finetune_steps: int = field(
+        default=0, metadata={"help": "The number of steps to take on the meta-fine-tune set during evaluation"}
+    )
+
 
 def get_dataset(args: DataTrainingArguments, tokenizer: PreTrainedTokenizer, evaluate=False, local_rank=-1):
     file_path = args.eval_data_file if evaluate else args.train_data_file
@@ -168,6 +172,7 @@ def main(model_args, data_args, training_args):
     # For now, just make meta-variable available in training_args
     training_args.meta = data_args.meta
     training_args.num_inner_steps = data_args.num_inner_steps
+    training_args.num_eval_finetune_steps = data_args.num_eval_finetune_steps
 
     if data_args.eval_data_file is None and training_args.do_eval:
         raise ValueError(
@@ -258,7 +263,6 @@ def main(model_args, data_args, training_args):
     else:
         data_args.block_size = min(data_args.block_size, tokenizer.max_len)
 
-    # TODO: review these datasets
     train_dataset = get_dataset(data_args, tokenizer=tokenizer) if training_args.do_train else None
     eval_dataset = get_dataset(data_args, tokenizer=tokenizer, evaluate=True) if training_args.do_eval else None
     data_collator = DataCollatorForLanguageModeling(
@@ -290,13 +294,17 @@ def main(model_args, data_args, training_args):
         train_output = trainer.train(model_path=model_path)
 
         # this logging is questionable
-        logger.save_model(trainer.model,
-                          trainer.optimizers,
-                          os.path.join(training_args.output_dir, 'model-' + str(train_output.global_step) + '.mdl'),
-                          train_output.training_loss)
+        # logger.save_model(trainer.model,
+        #                   trainer.optimizers,
+        #                   os.path.join(training_args.output_dir, 'model_bundle-' + str(train_output.global_step) + '.mdl'),
+        #                   train_output.training_loss,
+        #                   train_output.global_step)
 
+        # TODO: This is slow, must trasfer 1.5G over network
+        logger.info('saving trainged model')
         trainer.save_model()
         # TODO: do I need to save the tokenizer as well?
+        logger.info('saving pretrained tokenizer, but only locally')
         tokenizer.save_pretrained(training_args.output_dir)
 
     # Evaluation
