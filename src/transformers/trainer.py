@@ -501,20 +501,20 @@ class Trainer:
                     else:
                         # This serves as the meta-update for the meta trainer
                         # For now, keep check that model changed
-                        s = 0
-                        count = 0
-                        for param in model.parameters():
-                            s += torch.sum(param.data)
-                            if count >= 5:
-                                break
+                        # s = 0
+                        # count = 0
+                        # for param in model.parameters():
+                        #     s += torch.sum(param.data)
+                        #     if count >= 5:
+                        #         break
                         optimizer.step()
-                        s2 = 0
-                        count = 0
-                        for param in model.parameters():
-                            s2 += torch.sum(param.data)
-                            if count >= 5:
-                                break
-                        assert s != s2, "the model didn't appear to change"
+                        # s2 = 0
+                        # count = 0
+                        # for param in model.parameters():
+                        #     s2 += torch.sum(param.data)
+                        #     if count >= 5:
+                        #         break
+                        # assert s != s2, "the model didn't appear to change"
 
                     scheduler.step()
                     model.zero_grad()
@@ -593,7 +593,7 @@ class Trainer:
             print(output)
 
     def _training_step(
-        self, model: nn.Module, inputs: Dict[str, torch.Tensor], optimizer: torch.optim.Optimizer, step: Optional[int] = 0,
+        self, model: nn.Module, inputs: Dict[str, torch.Tensor], optimizer: torch.optim.Optimizer,
     ) -> float:
         model.train()
         for k, v in inputs.items():
@@ -614,7 +614,7 @@ class Trainer:
             loss.backward()
 
         this_loss = loss.item()
-        self.logger.log_train(step, this_loss)
+        self.logger.log_train(self.global_step, this_loss)
 
         return this_loss
 
@@ -959,12 +959,13 @@ class MetaTrainer(Trainer):
                     stop_next_iter = True
 
         # Now, take the meta step, which is the sum of all of the gradients in the gradients dictionary
-        meta_gradient = np.zeros_like(gradients[0])
+        # TODO: this is concerning, I received a key error for 0, but gradients wasn't empty. Maybe I have empty books?
+        meta_gradient = np.zeros_like(gradients[list(gradients.keys())[0]])
         for v in gradients.values():
             meta_gradient += v
 
         # Record outer_loss for this step
-        self.logger.log_outer(step, outer_loss)
+        self.logger.log_outer(self.global_step, outer_loss)
 
         # apply the meta_gradient to the network
         for p, g in zip(model.parameters(), meta_gradient):
