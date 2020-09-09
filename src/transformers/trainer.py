@@ -913,6 +913,9 @@ class MetaTrainer(Trainer):
         outer_loss = 0
         for booknum, bookdset in enumerate(inputs):
             # build a dataloader for the current book dataset
+            if len(bookdset) <= 0:
+                # ??
+                continue
             this_sampler = RandomSampler(bookdset)
             this_loader = DataLoader(bookdset,
                                      batch_size=self.args.train_batch_size,
@@ -1042,12 +1045,12 @@ class MetaTrainer(Trainer):
             trained_steps = 0
             while not inner_step_done:
                 for inner_step, book_data in enumerate(train_loader):
-                    trained_steps += 1
-
                     # for this book, update and then train and shit
                     if trained_steps > self.args.num_eval_finetune_steps:
                         inner_step_done = True
                         break
+
+                    trained_steps += 1
 
                     for k, v in book_data.items():
                         book_data[k] = v.to(self.args.device)
@@ -1127,7 +1130,7 @@ class MetaTrainer(Trainer):
                 metrics = self.compute_metrics(EvalPrediction(predictions=preds, label_ids=label_ids))
             else:
                 metrics = {}
-            np.exp(eval_losses)
+            #np.exp(eval_losses)
             if len(eval_losses) > 0:
                 metrics["perplexity"] = np.mean(np.exp(eval_losses))
                 metrics["loss"] = np.mean(eval_losses)
@@ -1137,14 +1140,16 @@ class MetaTrainer(Trainer):
                 if not key.startswith("eval_"):
                     metrics[f"eval_{key}"] = metrics.pop(key)
 
-            book_performances.append(PredictionOutput(predictions=preds, label_ids=label_ids, metrics=metrics))
+            book_performances.append((PredictionOutput(predictions=preds, label_ids=label_ids, metrics=metrics), bookdset['metatrain'].get_filepath()))
             # now, I need so somehow transfer all of this into a performance conglomerate
 
         all_losses = []
         all_perplex = []
+        all_filepaths = []
         for bp in book_performances:
-            all_losses.append(bp.metrics['eval_loss'])
-            all_perplex.append(bp.metrics['eval_perplexity'])
+            all_losses.append(bp[0].metrics['eval_loss'])
+            all_perplex.append(bp[0].metrics['eval_perplexity'])
+            all_filepaths.append(bp[1])
         avg_loss = np.mean(all_losses)
         std_loss = np.std(all_losses)
         ste_loss = std_loss / math.sqrt(len(all_losses))
@@ -1155,8 +1160,11 @@ class MetaTrainer(Trainer):
         # TODO: I am not tracking the list of perplexities for each book, I feel like I should, but not sure how.
         self.logger.log_eval(avg_loss, avg_perplex, self.global_step, std_loss, std_perplex, ste_loss, ste_perplex)
         stp = self.global_step if self.global_step is not None else 0
-        self.logger.log_json({'eval_losses': eval_losses, 'step': stp},
-                             'eval_results_' + str(stp) + '.json')
-        return book_performances[-1]  # This is meaningless, meaning the _log is meaningless, just use MLFlow
+        self.logger.log_json({'all_perplex': all_perplex, 'step': stp, 'files': all_filepaths},
+                             'all_perplexities_' + str(stp) + '.json')
+        print('perp:\tfilepaths')
+        for perp, fp in zip(all_perplex, all_filepaths):
+            print(f'{perp}:\t{fp}')
+        return book_performances[-1][0]  # This is meaningless, meaning the _log is meaningless, just use MLFlow
 
 

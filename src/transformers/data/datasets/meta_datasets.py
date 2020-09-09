@@ -33,6 +33,8 @@ class BookDataset(Dataset):
     ):
         assert os.path.isfile(file_path), file_path
 
+        self.file_path = file_path
+
         block_size = block_size - tokenizer.num_special_tokens_to_add(pair=False)
 
         directory, filename = os.path.split(file_path)
@@ -94,6 +96,9 @@ class BookDataset(Dataset):
 
     def size(self, i) -> int:
         return len(self.examples)
+
+    def get_filepath(self):
+        return self.file_path
 
 
 class GutenburgDataset(Dataset):
