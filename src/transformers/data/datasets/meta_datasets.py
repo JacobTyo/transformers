@@ -121,10 +121,12 @@ class GutenburgDataset(Dataset):
         self.eval = eval
 
         # we have a list of books, now when we server each dataset, create the book datasets and return
+        logger.info('building Gutenburg dataset')
         self.books = []
         for dirpath, dirnames, filenames in os.walk(file_path):
             for filename in [f for f in filenames if f.endswith('.txt') and 'cached_' not in f]:
                 self.books.append(os.path.join(dirpath, filename))
+        logger.info('Gutenburg dataset built')
 
     def __len__(self):
         return len(self.books)

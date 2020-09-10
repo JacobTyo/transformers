@@ -265,13 +265,15 @@ def main(model_args, data_args, training_args):
 
     train_dataset = get_dataset(data_args, tokenizer=tokenizer) if training_args.do_train else None
     eval_dataset = get_dataset(data_args, tokenizer=tokenizer, evaluate=True) if training_args.do_eval else None
+    logger.info('creating data collator')
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer, mlm=data_args.mlm, mlm_probability=data_args.mlm_probability
     )
     if data_args.meta != 'none':
         outer_collator = DataCollatorForMetaLanguageModeling()
+    logger.info('data collator created')
 
-
+    logger.info('initializing trainer')
     # Initialize our Trainer
     trainer = MetaTrainer(
         model=model,
@@ -283,6 +285,7 @@ def main(model_args, data_args, training_args):
         inner_collator=data_collator,
         logger=logger,
     )
+    logger.info('trainer initialized')
 
     # Training
     if training_args.do_train:
