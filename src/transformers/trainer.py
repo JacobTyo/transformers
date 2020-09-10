@@ -956,14 +956,19 @@ class MetaTrainer(Trainer):
                 optimizer.step()
                 model.zero_grad()
 
-                if inner_step >= self.args.num_inner_steps:
+                if inner_step >= self.args.num_inner_steps*self.args.gradient_accumulation_steps:
                     # we are finished training this model, so we need to take one more step
                     # (I think, and just save the gradient)
                     stop_next_iter = True
 
         # Now, take the meta step, which is the sum of all of the gradients in the gradients dictionary
         # TODO: this is concerning, I received a key error for 0, but gradients wasn't empty. Maybe I have empty books?
-        meta_gradient = np.zeros_like(gradients[list(gradients.keys())[0]])
+        #  for now, if empty just skip, not sure what to do
+        if gradients:
+            meta_gradient = np.zeros_like(gradients[list(gradients.keys())[0]])
+        else:
+            return -1
+
         for v in gradients.values():
             meta_gradient += v
 
@@ -1046,7 +1051,7 @@ class MetaTrainer(Trainer):
             while not inner_step_done:
                 for inner_step, book_data in enumerate(train_loader):
                     # for this book, update and then train and shit
-                    if trained_steps > self.args.num_eval_finetune_steps:
+                    if trained_steps > self.args.num_eval_finetune_steps * self.args.gradient_accumulation_steps:
                         inner_step_done = True
                         break
 
