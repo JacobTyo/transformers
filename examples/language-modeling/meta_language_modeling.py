@@ -151,6 +151,10 @@ class DataTrainingArguments:
         default=0, metadata={"help": "The number of steps to take on the meta-fine-tune set during evaluation"}
     )
 
+    k: int = field(
+        default=2500, metadata={"help": "The number of tokens to use in the meta-train sets"}
+    )
+
 
 def get_dataset(args: DataTrainingArguments, tokenizer: PreTrainedTokenizer, evaluate=False, local_rank=-1):
     file_path = args.eval_data_file if evaluate else args.train_data_file
@@ -161,7 +165,7 @@ def get_dataset(args: DataTrainingArguments, tokenizer: PreTrainedTokenizer, eva
     else:
         return GutenburgDataset(tokenizer=tokenizer, file_path=file_path, block_size=args.block_size,
                                 train_batch_size=training_args.per_gpu_train_batch_size * training_args.n_gpu,
-                                eval=evaluate)
+                                eval=evaluate, k=data_args.k)
 
 
 def main(model_args, data_args, training_args):
@@ -173,6 +177,7 @@ def main(model_args, data_args, training_args):
     training_args.meta = data_args.meta
     training_args.num_inner_steps = data_args.num_inner_steps
     training_args.num_eval_finetune_steps = data_args.num_eval_finetune_steps
+    training_args.k = data_args.k
 
     if data_args.eval_data_file is None and training_args.do_eval:
         raise ValueError(
@@ -297,11 +302,11 @@ def main(model_args, data_args, training_args):
         train_output = trainer.train(model_path=model_path)
 
         # this logging is questionable
-        # logger.save_model(trainer.model,
-        #                   trainer.optimizers,
-        #                   os.path.join(training_args.output_dir, 'model_bundle-' + str(train_output.global_step) + '.mdl'),
-        #                   train_output.training_loss,
-        #                   train_output.global_step)
+        logger.save_model(trainer.model,
+                          trainer.optimizers,
+                          os.path.join(training_args.output_dir, 'model_bundle-' + str(train_output.global_step) + '.mdl'),
+                          train_output.training_loss,
+                          train_output.global_step)
 
         # TODO: This is slow, must trasfer 1.5G over network
         logger.info('saving trainged model')
@@ -333,7 +338,7 @@ if __name__ == "__main__":
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
     mlflow.set_tracking_uri('http://gs18196.sp.cs.cmu.edu:6460')
-    mlflow.set_experiment("MetaLMs")
+    mlflow.set_experiment("Gutenburg")
     with mlflow.start_run(run_name=data_args.run_name):
         all_args = {}
         for d in [model_args, data_args, training_args]:

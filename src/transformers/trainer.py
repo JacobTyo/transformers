@@ -28,6 +28,8 @@ from .trainer_utils import PREFIX_CHECKPOINT_DIR, EvalPrediction, PredictionOutp
 from .training_args import TrainingArguments, is_tpu_available
 from .data import Logger
 
+import threading
+
 try:
     from apex import amp
 
@@ -383,6 +385,9 @@ class Trainer:
             t_total = int(len(train_dataloader) // self.args.gradient_accumulation_steps * self.args.num_train_epochs)
             num_train_epochs = self.args.num_train_epochs
 
+        # for use in saving model to backend MLFlow
+        savethread = None
+
         optimizer, scheduler = self.get_optimizers(num_training_steps=t_total)
 
         # Check if saved optimizer or scheduler states exist
@@ -499,22 +504,7 @@ class Trainer:
                     if is_tpu_available():
                         xm.optimizer_step(optimizer)
                     else:
-                        # This serves as the meta-update for the meta trainer
-                        # For now, keep check that model changed
-                        # s = 0
-                        # count = 0
-                        # for param in model.parameters():
-                        #     s += torch.sum(param.data)
-                        #     if count >= 5:
-                        #         break
                         optimizer.step()
-                        # s2 = 0
-                        # count = 0
-                        # for param in model.parameters():
-                        #     s2 += torch.sum(param.data)
-                        #     if count >= 5:
-                        #         break
-                        # assert s != s2, "the model didn't appear to change"
 
                     scheduler.step()
                     model.zero_grad()
@@ -551,6 +541,22 @@ class Trainer:
 
                         self.save_model(output_dir)
 
+                        # TODO: I want to save the model to mlflow here, but how do I do it reasonably efficiently?
+                        #  start a thread?
+                        if savethread is not None:
+                            # make sure there are not multiple savethreads
+                            savethread.join()
+
+                        savethread = threading.Thread(target=self.logger.save_model,
+                                                      args=(model,
+                                                            optimizer,
+                                                            'tmp' + str(self.global_step),
+                                                            logging_loss,
+                                                            self.global_step))
+                        # start the thread
+                        savethread.daemon = True
+                        savethread.start()
+
                         if self.is_world_master():
                             self._rotate_checkpoints()
 
@@ -565,12 +571,14 @@ class Trainer:
                 if self.args.max_steps > 0 and self.global_step > self.args.max_steps:
                     epoch_iterator.close()
                     break
+
             if self.args.max_steps > 0 and self.global_step > self.args.max_steps:
                 train_iterator.close()
                 break
             if self.args.tpu_metrics_debug:
                 # tpu-comment: Logging debug metrics for PyTorch/XLA (compile, execute times, ops, etc.)
                 xm.master_print(met.metrics_report())
+            # maybe save model here? once Every epoch? Weird that it doesn't correspond to the training though?
 
         if self.tb_writer:
             self.tb_writer.close()

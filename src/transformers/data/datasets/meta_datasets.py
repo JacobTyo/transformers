@@ -7,6 +7,8 @@ from torch.utils.data.dataset import Dataset
 from transformers.tokenization_utils import PreTrainedTokenizer
 from torch.utils.data import Sampler
 
+from typing import Dict
+
 import logging
 
 logger = logging.getLogger(__name__)
@@ -110,7 +112,8 @@ class GutenburgDataset(Dataset):
             block_size: int,
             overwrite_cache=False,
             train_batch_size=1,
-            eval=False
+            eval=False,
+            k=2500
     ):
         assert os.path.isdir(file_path)
 
@@ -119,6 +122,7 @@ class GutenburgDataset(Dataset):
         self.overwrite_cache = overwrite_cache
         self.train_batch_size = train_batch_size
         self.eval = eval
+        self.k = k
 
         # we have a list of books, now when we server each dataset, create the book datasets and return
         logger.info('building Gutenburg dataset')
@@ -131,7 +135,7 @@ class GutenburgDataset(Dataset):
     def __len__(self):
         return len(self.books)
 
-    def __getitem__(self, i) -> Dataset:
+    def __getitem__(self, i) -> Dict[str, Dataset]:
         '''
         Args:
             i:
@@ -139,18 +143,35 @@ class GutenburgDataset(Dataset):
         Returns:
 
         '''
-        # I Don't think I need this - or maybe I do but just for eval as is noted.
+        if self.k == 250:
+            file_extension = '250'
+        elif self.k == 500:
+            file_extension = '500'
+        elif self.k == 1000:
+            file_extension = '1000'
+        elif self.k == 2500:
+            file_extension = '2500'
+        elif self.k == 5000:
+            file_extension = '5000'
+        elif self.k == 10000:
+            file_extension = '10000'
+        else:
+            assert False, 'the token size is not recognized'
+
+        train_file_extension = '.' + file_extension + 'metatrain'
+        test_file_extension = '.metatest'
+
         if self.eval:
             metatrain = BookDataset(
                 tokenizer=self.tokenizer,
-                file_path=self.books[i]+'.metatrain',
+                file_path=self.books[i] + train_file_extension,
                 block_size=self.block_size,
                 overwrite_cache=self.overwrite_cache,
                 train_batch_size=self.train_batch_size
             )
             metatest = BookDataset(
                 tokenizer=self.tokenizer,
-                file_path=self.books[i] + '.metatest',
+                file_path=self.books[i] + test_file_extension,
                 block_size=self.block_size,
                 overwrite_cache=self.overwrite_cache,
                 train_batch_size=self.train_batch_size

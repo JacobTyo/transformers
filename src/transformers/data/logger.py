@@ -2,7 +2,7 @@ import mlflow
 import logging
 import torch
 import json
-
+import threading
 
 class Logger(logging.Logger):
     def __init__(self, name, args=None, level=logging.info, artifact_uri=None):
@@ -57,8 +57,20 @@ class Logger(logging.Logger):
 
     # TODO: Make sure this works, I'm currently losing my models I think
     def save_model(self, model, optimizers, save_path, loss, step):
-        if self.best_model_loss is None or self.best_model_loss >= loss:
-            self.info('saving best model')
+        savethread = threading.Thread(target=self._save_model,
+                                      args=(model,
+                                            optimizers,
+                                            save_path,
+                                            loss,
+                                            step))
+        # start the thread
+        savethread.daemon = True
+        savethread.start()
+
+    def _save_model(self, model, optimizers, save_path, loss, step):
+        # if self.best_model_loss is None or self.best_model_loss >= loss:
+        #     self.info('saving best model')
+        try:
             torch.save({
                 'step': step,
                 'model_state_dict': model.state_dict(),
@@ -66,7 +78,15 @@ class Logger(logging.Logger):
                 'schedular_state_dict': optimizers[1].state_dict(),
                 'loss': loss
             }, save_path)
+        except Exception:
+            torch.save({
+                'step': step,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizers.state_dict(),
+                'schedular_state_dict': None,
+                'loss': loss
+            }, save_path)
 
-            mlflow.log_artifact(save_path)
-        else:
-            self.info('model performance is not best, not saving')
+        mlflow.log_artifact(save_path)
+        # else:
+        #     self.info('model performance is not best, not saving')
