@@ -1047,6 +1047,10 @@ class MetaTrainer(Trainer):
             preds: torch.Tensor = None
             label_ids: torch.Tensor = None
 
+            if len(bookdset['metatrain']) < 1:
+                # TODO: not sure why this is needed
+                continue
+
             train_sampler = RandomSampler(bookdset['metatrain'])
             train_loader = DataLoader(bookdset['metatrain'],
                                       batch_size=self.args.train_batch_size,
