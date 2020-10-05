@@ -1046,51 +1046,54 @@ class MetaTrainer(Trainer):
             eval_losses: List[float] = []
             preds: torch.Tensor = None
             label_ids: torch.Tensor = None
-
+            skip_training = False
             if len(bookdset['metatrain']) < 1:
                 # TODO: not sure why this is needed
+                # This may happen if there is not a full batch??? so just skip to the eval part?
+                # This is likely what the issue is?
                 print('the metatrain dataset is empty here, continuing.')
                 tmp = bookdset['metatrain'].get_filepath()
                 print(f"filename: {tmp}")
-                continue
+                skip_training = True
 
-            train_sampler = RandomSampler(bookdset['metatrain'])
-            train_loader = DataLoader(bookdset['metatrain'],
-                                      batch_size=self.args.train_batch_size,
-                                      sampler=train_sampler,
-                                      collate_fn=self.inner_collator.collate_batch)
+            if not skip_training:
+                train_sampler = RandomSampler(bookdset['metatrain'])
+                train_loader = DataLoader(bookdset['metatrain'],
+                                          batch_size=self.args.train_batch_size,
+                                          sampler=train_sampler,
+                                          collate_fn=self.inner_collator.collate_batch)
 
-            # do the fine-tuning step
-            inner_step_done = False
-            trained_steps = 0
-            while not inner_step_done:
-                for inner_step, book_data in enumerate(train_loader):
-                    # for this book, update and then train and shit
-                    if trained_steps >= self.args.num_eval_finetune_steps * self.args.gradient_accumulation_steps:
-                        inner_step_done = True
-                        break
+                # do the fine-tuning step
+                inner_step_done = False
+                trained_steps = 0
+                while not inner_step_done:
+                    for inner_step, book_data in enumerate(train_loader):
+                        # for this book, update and then train and shit
+                        if trained_steps >= self.args.num_eval_finetune_steps * self.args.gradient_accumulation_steps:
+                            inner_step_done = True
+                            break
 
-                    trained_steps += 1
+                        trained_steps += 1
 
-                    for k, v in book_data.items():
-                        book_data[k] = v.to(self.args.device)
+                        for k, v in book_data.items():
+                            book_data[k] = v.to(self.args.device)
 
-                    outputs = model(**book_data)
-                    loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
+                        outputs = model(**book_data)
+                        loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
 
-                    if self.args.n_gpu > 1:
-                        loss = loss.mean()  # mean() to average on multi-gpu parallel training
-                    if self.args.gradient_accumulation_steps > 1:
-                        loss = loss / self.args.gradient_accumulation_steps
+                        if self.args.n_gpu > 1:
+                            loss = loss.mean()  # mean() to average on multi-gpu parallel training
+                        if self.args.gradient_accumulation_steps > 1:
+                            loss = loss / self.args.gradient_accumulation_steps
 
-                    if self.args.fp16:
-                        with amp.scale_loss(loss, optimizer) as scaled_loss:
-                            scaled_loss.backward()
-                    else:
-                        loss.backward()
+                        if self.args.fp16:
+                            with amp.scale_loss(loss, optimizer) as scaled_loss:
+                                scaled_loss.backward()
+                        else:
+                            loss.backward()
 
-                    optimizer.step()
-                    model.zero_grad()
+                        optimizer.step()
+                        model.zero_grad()
 
             test_sampler = SequentialSampler(bookdset['metatest'])
             test_loader = DataLoader(bookdset['metatest'],
