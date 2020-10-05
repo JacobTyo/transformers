@@ -130,7 +130,7 @@ class GutenburgDataset(Dataset):
         for dirpath, dirnames, filenames in os.walk(file_path):
             for filename in [f for f in filenames if f.endswith('.txt') and 'cached_' not in f]:
                 self.books.append(os.path.join(dirpath, filename))
-        logger.info('Gutenburg dataset built')
+        logger.info(f'Gutenburg dataset built, containing {len(self.books)} books.')
 
     def __len__(self):
         return len(self.books)

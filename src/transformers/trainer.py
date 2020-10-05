@@ -1049,6 +1049,9 @@ class MetaTrainer(Trainer):
 
             if len(bookdset['metatrain']) < 1:
                 # TODO: not sure why this is needed
+                print('the metatrain dataset is empty here, continuing.')
+                tmp = bookdset['metatrain'].get_filepath()
+                print(f"filename: {tmp}")
                 continue
 
             train_sampler = RandomSampler(bookdset['metatrain'])
@@ -1063,7 +1066,7 @@ class MetaTrainer(Trainer):
             while not inner_step_done:
                 for inner_step, book_data in enumerate(train_loader):
                     # for this book, update and then train and shit
-                    if trained_steps > self.args.num_eval_finetune_steps * self.args.gradient_accumulation_steps:
+                    if trained_steps >= self.args.num_eval_finetune_steps * self.args.gradient_accumulation_steps:
                         inner_step_done = True
                         break
 
@@ -1099,6 +1102,7 @@ class MetaTrainer(Trainer):
             model.eval()
 
             # now eval on the test set
+            print(f'the test loader len is (during eval) is: {len(test_loader)}')
             for inputs in test_loader:
                 has_labels = any(inputs.get(k) is not None for k in ["labels", "lm_labels", "masked_lm_labels"])
 
@@ -1112,6 +1116,7 @@ class MetaTrainer(Trainer):
                         eval_losses += [step_eval_loss.mean().item()]
                     else:
                         logits = outputs[0]
+                        assert False, "I don't think that this works.  Must use labels."
 
                 if not prediction_loss_only:
                     if preds is None:
@@ -1174,11 +1179,10 @@ class MetaTrainer(Trainer):
         std_perplex = np.std(all_perplex)
         ste_perplex = std_perplex / math.sqrt(len(all_perplex))
 
-        # TODO: I am not tracking the list of perplexities for each book, I feel like I should, but not sure how.
         self.logger.log_eval(avg_loss, avg_perplex, self.global_step, std_loss, std_perplex, ste_loss, ste_perplex)
         stp = self.global_step if self.global_step is not None else 0
         self.logger.log_json({'all_perplex': all_perplex, 'step': stp, 'files': all_filepaths},
-                             'all_perplexities_' + str(stp) + '.json')
+                             self.args.run_name + '_all_perplexities_' + str(stp) + '.json')
         print('perp:\tfilepaths')
         for perp, fp in zip(all_perplex, all_filepaths):
             print(f'{perp}:\t{fp}')
