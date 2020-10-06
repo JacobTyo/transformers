@@ -149,3 +149,7 @@ debug.env
 
 #ctags
 tags
+
+# jake
+kept_runs
+examples/language-modeling/out
