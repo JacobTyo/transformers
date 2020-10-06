@@ -178,6 +178,7 @@ def main(model_args, data_args, training_args):
     training_args.num_inner_steps = data_args.num_inner_steps
     training_args.num_eval_finetune_steps = data_args.num_eval_finetune_steps
     training_args.k = data_args.k
+    training_args.run_name = data_args.run_name
 
     if data_args.eval_data_file is None and training_args.do_eval:
         raise ValueError(
@@ -238,6 +239,8 @@ def main(model_args, data_args, training_args):
             "This is not supported, but you can do it from another script, save it,"
             "and load it from here, using --tokenizer_name"
         )
+    # enable padding so we can use small amounts of (meta) training data
+    tokenizer.pad_token = tokenizer.eos_token
 
     if model_args.model_name_or_path:
         logger.info(f"Loading model from {model_args.model_name_or_path}")

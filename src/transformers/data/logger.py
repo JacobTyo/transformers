@@ -3,6 +3,7 @@ import logging
 import torch
 import json
 import threading
+import os
 
 class Logger(logging.Logger):
     def __init__(self, name, args=None, level=logging.info, artifact_uri=None):
@@ -47,6 +48,12 @@ class Logger(logging.Logger):
         with open(filename, 'w') as f:
             json.dump(json_obj, f, indent=4, sort_keys=True)
         mlflow.log_artifact(filename)
+        # remove the file
+        try:
+            os.remove(filename)
+        except Exception:
+            # whatever
+            pass
 
     @staticmethod
     def log_test(loss, perplexity, step, std=None):
@@ -55,7 +62,6 @@ class Logger(logging.Logger):
         if std:
             mlflow.log_metric('test/std', std, step)
 
-    # TODO: Make sure this works, I'm currently losing my models I think
     def save_model(self, model, optimizers, save_path, loss, step):
         savethread = threading.Thread(target=self._save_model,
                                       args=(model,
@@ -88,5 +94,13 @@ class Logger(logging.Logger):
             }, save_path)
 
         mlflow.log_artifact(save_path)
+
+        # delete the save_path file?
+        # try:
+        #     os.remove(save_path)
+        # except Exception:
+        #     # whatever
+        #     pass
+
         # else:
         #     self.info('model performance is not best, not saving')

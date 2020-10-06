@@ -1048,9 +1048,8 @@ class MetaTrainer(Trainer):
             label_ids: torch.Tensor = None
             skip_training = False
             if len(bookdset['metatrain']) < 1:
-                # TODO: not sure why this is needed
-                # This may happen if there is not a full batch??? so just skip to the eval part?
-                # This is likely what the issue is?
+                # This may happen if there is not a full batch, so just skip to the eval part
+                # (This is a problem for the smaller token counts)
                 print('the metatrain dataset is empty here, continuing.')
                 tmp = bookdset['metatrain'].get_filepath()
                 print(f"filename: {tmp}")
@@ -1076,7 +1075,11 @@ class MetaTrainer(Trainer):
                         trained_steps += 1
 
                         for k, v in book_data.items():
+                            # keys are input_ids, labels, pad information if necessary
                             book_data[k] = v.to(self.args.device)
+
+                        # pad book_data if necessary
+
 
                         outputs = model(**book_data)
                         loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
@@ -1105,7 +1108,7 @@ class MetaTrainer(Trainer):
             model.eval()
 
             # now eval on the test set
-            print(f'the test loader len is (during eval) is: {len(test_loader)}')
+            # print(f'the test loader len is (during eval) is: {len(test_loader)}')
             for inputs in test_loader:
                 has_labels = any(inputs.get(k) is not None for k in ["labels", "lm_labels", "masked_lm_labels"])
 
@@ -1165,7 +1168,7 @@ class MetaTrainer(Trainer):
                 if not key.startswith("eval_"):
                     metrics[f"eval_{key}"] = metrics.pop(key)
 
-            book_performances.append((PredictionOutput(predictions=preds, label_ids=label_ids, metrics=metrics), bookdset['metatrain'].get_filepath()))
+            book_performances.append((PredictionOutput(predictions=preds, label_ids=label_ids, metrics=metrics), bookdset['metatest'].get_filepath()))
             # now, I need so somehow transfer all of this into a performance conglomerate
 
         all_losses = []
