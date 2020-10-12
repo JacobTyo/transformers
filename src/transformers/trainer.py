@@ -994,11 +994,14 @@ class MetaTrainer(Trainer):
     ) -> PredictionOutput:
         if self.args.meta == 'none' or self.args.meta == 'fomaml':
             return self._standard_prediction_loop(dataloader, description, prediction_loss_only)
+        elif self.args.meta == 'condition':
+            return self._standard_prediction_loop(dataloader, description, prediction_loss_only, condition=True)
         else:
             raise NotImplementedError('the requested meta-learning method is not implemented.')
 
     def _standard_prediction_loop(
-            self, dataloader: DataLoader, description: str, prediction_loss_only: Optional[bool] = None
+            self, dataloader: DataLoader, description: str, prediction_loss_only: Optional[bool] = None,
+            condition: Optional[bool] = False,
     ) -> PredictionOutput:
         """
         Prediction/evaluation loop, shared by `evaluate()` and `predict()`.
@@ -1107,6 +1110,15 @@ class MetaTrainer(Trainer):
             # put model in eval mode
             model.eval()
 
+            # set the conditioning tokens
+            # not sure exactly how this should be done
+            if skip_training:
+                assert not condition, 'training was skipped due to no metatrain data, but we are conditioning. '
+            if condition:
+                for _, cond_data in enumerate(train_loader):
+                    cond_tokens = cond_data[:self.args.k]  # to condition size? which should be the same as k?
+                    break
+
             # now eval on the test set
             # print(f'the test loader len is (during eval) is: {len(test_loader)}')
             for inputs in test_loader:
@@ -1115,11 +1127,19 @@ class MetaTrainer(Trainer):
                 for k, v in inputs.items():
                     inputs[k] = v.to(self.args.device)
 
+                if condition:
+                    # each of v needs to have the condition tokens added
+                    assert False, 'this is not yet implemented'
+
                 with torch.no_grad():
                     outputs = model(**inputs)
                     if has_labels:
                         step_eval_loss, logits = outputs[:2]
-                        eval_losses += [step_eval_loss.mean().item()]
+                        # if conditioning, only count the loss of the non conditioning tokens
+                        if condition:
+                            assert False, 'not yet implemented'
+                        else:
+                            eval_losses += [step_eval_loss.mean().item()]
                     else:
                         logits = outputs[0]
                         assert False, "I don't think that this works.  Must use labels."

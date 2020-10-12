@@ -96,11 +96,11 @@ class Logger(logging.Logger):
         mlflow.log_artifact(save_path)
 
         # delete the save_path file?
-        # try:
-        #     os.remove(save_path)
-        # except Exception:
-        #     # whatever
-        #     pass
+        try:
+            os.remove(save_path)
+        except Exception:
+            # whatever
+            pass
 
         # else:
         #     self.info('model performance is not best, not saving')
