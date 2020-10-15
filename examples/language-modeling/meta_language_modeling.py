@@ -165,7 +165,7 @@ def get_dataset(args: DataTrainingArguments, tokenizer: PreTrainedTokenizer, eva
     else:
         return GutenburgDataset(tokenizer=tokenizer, file_path=file_path, block_size=args.block_size,
                                 train_batch_size=training_args.per_gpu_train_batch_size * training_args.n_gpu,
-                                eval=evaluate, k=data_args.k)
+                                k=data_args.k)
 
 
 def main(model_args, data_args, training_args):
@@ -277,6 +277,8 @@ def main(model_args, data_args, training_args):
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer, mlm=data_args.mlm, mlm_probability=data_args.mlm_probability
     )
+
+    # TODO: is this correct for conditioning?
     if data_args.meta != 'none':
         outer_collator = DataCollatorForMetaLanguageModeling()
     logger.info('data collator created')

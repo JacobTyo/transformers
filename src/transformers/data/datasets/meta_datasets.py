@@ -7,7 +7,7 @@ from torch.utils.data.dataset import Dataset
 from transformers.tokenization_utils import PreTrainedTokenizer
 from torch.utils.data import Sampler
 
-from typing import Dict
+from typing import Dict, List
 
 import logging
 
@@ -65,10 +65,7 @@ class BookDataset(Dataset):
 
             tokenized_text = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(text))
 
-            # TODO: Is this proper behavior? Do we get training data like this?
             for i in range(0, len(tokenized_text), block_size):
-            # for i in range(0, len(tokenized_text) - block_size + 1, block_size):  # Truncate in block of block_size
-            #     partial_len = None
                 if i + block_size <= len(tokenized_text):
                     self.examples.append(
                         tokenizer.build_inputs_with_special_tokens(tokenized_text[i : i + block_size])
@@ -77,46 +74,6 @@ class BookDataset(Dataset):
                     self.examples.append(
                         tokenizer.build_inputs_with_special_tokens(tokenized_text[i:])
                     )
-                    # # tmp = torch.zeros(block_size)
-                    # tokens = tokenizer.build_inputs_with_special_tokens(tokenized_text[i:])
-                    # # partial_len = len(tokens)
-                    # tmp[:partial_len] = torch.tensor(tokens)
-                    # self.examples.append(
-                    #     tmp
-                    # )
-                # TODO: must make sure that train and eval batch sizes are the same
-                # atn_mask = torch.zeros(block_size)
-                # tmp = torch.tensor(self.examples[-1])
-                # if partial_len:
-                #     atn_mask[:partial_len] = torch.ones(partial_len)
-                # else:
-                #     atn_mask[:tmp.shape[0]] = torch.ones(tmp.shape[0])
-                # self.attention_masks.append(
-                #     atn_mask
-                # )
-            # # TODO: test this - print a few examples and masks
-            # print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
-            # print('the first entry of examples and attention masks')
-            # print(self.examples[0].shape, self.attention_masks[0].shape)
-            # print(self.examples[0])
-            # print(self.attention_masks[0])
-            # print('the last entry of examples and attention masks')
-            # print(self.examples[-1].shape, self.attention_masks[-1].shape)
-            # print(self.examples[-1])
-            # print(self.attention_masks[-1])
-            # print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
-            # exit(0)
-
-            # Note that we are losing the last truncated example here for the sake of simplicity (no padding)
-            # If your dataset is small, first you should look for a bigger one :-) and second you
-            # can change this behavior by adding (model specific) padding.
-
-            # Ignore incomplete batches
-            # If you don't do this, you'll get an error at the end of training
-            # TODO: verify this - I may need this after all, so I can train with very small amounts of data.
-            # n = len(self.examples) % train_batch_size
-            # if n != 0:
-            #     self.examples = self.examples[:-n]
 
             logger.debug(f"The number of examples for this dataset file is: {len(self.examples)}")
 
@@ -134,9 +91,6 @@ class BookDataset(Dataset):
     def __getitem__(self, i) -> torch.Tensor:
         return torch.tensor(self.examples[i], dtype=torch.long)
 
-    # def get_attention_mask(self, i) -> torch.Tensor:
-    #     torch.tensor(self.attention_masks[i], dtype=torch.long)
-
     def size(self, i) -> int:
         return len(self.examples)
 
@@ -145,16 +99,15 @@ class BookDataset(Dataset):
 
 
 class GutenburgDataset(Dataset):
-    # first get a list of all the files we care about
+
     def __init__(
             self,
             tokenizer: PreTrainedTokenizer,
             file_path: str,
             block_size: int,
-            overwrite_cache=False,
-            train_batch_size=1,
-            eval=False,
-            k=2500
+            overwrite_cache: bool = False,
+            train_batch_size: int = 1,
+            k: int = 2500
     ):
         assert os.path.isdir(file_path)
 
@@ -164,6 +117,15 @@ class GutenburgDataset(Dataset):
         self.train_batch_size = train_batch_size
         self.eval = eval
         self.k = k
+
+        self.file_extensions = dict([
+        (250, '250'),
+        (500, '500'),
+        (1000, '1000'),
+        (2500, '2500'),
+        (5000, '5000'),
+        (10000, '10000'),
+    ])
 
         # we have a list of books, now when we server each dataset, create the book datasets and return
         logger.info('building Gutenburg dataset')
@@ -176,79 +138,30 @@ class GutenburgDataset(Dataset):
     def __len__(self):
         return len(self.books)
 
-    def __getitem__(self, i) -> Dict[str, Dataset]:
-        '''
-        Args:
-            i:
+    def __getitem__(self, i: int) -> List[Dict[str, Dataset]]:
 
-        Returns:
-
-        '''
-        if self.k == 250:
-            file_extension = '250'
-        elif self.k == 500:
-            file_extension = '500'
-        elif self.k == 1000:
-            file_extension = '1000'
-        elif self.k == 2500:
-            file_extension = '2500'
-        elif self.k == 5000:
-            file_extension = '5000'
-        elif self.k == 10000:
-            file_extension = '10000'
+        if self.k in self.file_extensions.keys():
+            file_extension = self.file_extensions[self.k]
         else:
-            assert False, 'the token size is not recognized'
+            raise ValueError("GutenburgDataset: invalid value for k")
 
         train_file_extension = '.' + file_extension + 'metatrain'
         test_file_extension = '.metatest'
 
-        if self.eval:
-            metatrain = BookDataset(
-                tokenizer=self.tokenizer,
-                file_path=self.books[i] + train_file_extension,
-                block_size=self.block_size,
-                overwrite_cache=self.overwrite_cache,
-                train_batch_size=self.train_batch_size
-            )
-            metatest = BookDataset(
-                tokenizer=self.tokenizer,
-                file_path=self.books[i] + test_file_extension,
-                block_size=self.block_size,
-                overwrite_cache=self.overwrite_cache,
-                train_batch_size=self.train_batch_size
-            )
-            # TODO: I don't know how to handle this
-            # This needs to return a dataset, but at the same time, I need both datasets
-            return {'metatrain': metatrain, 'metatest': metatest}
-
-        else:
-            bookdataset = BookDataset(
-                tokenizer=self.tokenizer,
-                file_path=self.books[i],
-                block_size=self.block_size,
-                overwrite_cache=self.overwrite_cache,
-                train_batch_size=self.train_batch_size
-            )
-            return bookdataset
-
-
-# class GutenburgSampler(Sampler):
-#     r"""
-#
-#     """
-#
-#     def __init__(self, data_source):
-#         assert isinstance(data_source, GutenburgDataset), 'This sampler can only be used with a Gutenburg Dataset'
-#
-#         self.data_source = data_source
-#
-#     @property
-#     def num_samples(self):
-#         return len(self.data_source)
-#
-#     def __iter__(self):
-#         n = len(self.data_source)
-#         return iter(torch.randperm(n, generator=self.generator).tolist())
-#
-#     def __len__(self):
-#         return self.num_samples
+        metatrain = BookDataset(
+            tokenizer=self.tokenizer,
+            file_path=self.books[i] + train_file_extension,
+            block_size=self.block_size,
+            overwrite_cache=self.overwrite_cache,
+            train_batch_size=self.train_batch_size
+        )
+        metatest = BookDataset(
+            tokenizer=self.tokenizer,
+            file_path=self.books[i] + test_file_extension,
+            block_size=self.block_size,
+            overwrite_cache=self.overwrite_cache,
+            train_batch_size=self.train_batch_size
+        )
+        # TODO: I don't know how to handle this
+        # This needs to return a dataset, but at the same time, I need both datasets
+        return [{'metatrain': metatrain, 'metatest': metatest}]

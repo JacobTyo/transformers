@@ -885,21 +885,311 @@ class MetaTrainer(Trainer):
         self.inner_collator = inner_collator
         self.eval_collator = inner_collator if inner_collator is not None else data_collator
 
+    def train(self, model_path: Optional[str] = None):
+        """
+        Main training entry point.
+
+        Args:
+            model_path:
+                (Optional) Local path to model if model to train has been instantiated from a local path
+                If present, we will try reloading the optimizer/scheduler states from there.
+        """
+        # if not metalearning or conditioning, just use the original training method
+        if self.args.meta == 'none':
+            return super(MetaTrainer, self).train(model_path)
+
+        # in this case, the dataloader length is the number of books
+        train_dataloader = self.get_train_dataloader()
+
+        # TODO: this calculation is misleading - the len of the dataloader isn't very meaningful.
+        #  what we want is the len of all of the metatest sets of the dataloader
+        if self.args.max_steps > 0:
+            t_total = self.args.max_steps
+            num_train_epochs = (
+                self.args.max_steps // (len(train_dataloader) // self.args.gradient_accumulation_steps) + 1
+            )
+        else:
+            t_total = int(len(train_dataloader) // self.args.gradient_accumulation_steps * self.args.num_train_epochs)
+            num_train_epochs = self.args.num_train_epochs
+
+        # for use in saving model to backend MLFlow
+        savethread = None
+
+        optimizer, scheduler = self.get_optimizers(num_training_steps=t_total)
+
+        # Check if saved optimizer or scheduler states exist
+        if (
+            model_path is not None
+            and os.path.isfile(os.path.join(model_path, "optimizer.pt"))
+            and os.path.isfile(os.path.join(model_path, "scheduler.pt"))
+        ):
+            # Load in optimizer and scheduler states
+            optimizer.load_state_dict(
+                torch.load(os.path.join(model_path, "optimizer.pt"), map_location=self.args.device)
+            )
+            scheduler.load_state_dict(torch.load(os.path.join(model_path, "scheduler.pt")))
+
+        model = self.model
+        if self.args.fp16:
+            if not is_apex_available():
+                raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
+            model, optimizer = amp.initialize(model, optimizer, opt_level=self.args.fp16_opt_level)
+
+        # multi-gpu training (should be after apex fp16 initialization)
+        if self.args.n_gpu > 1:
+            model = torch.nn.DataParallel(model)
+
+        # Distributed training (should be after apex fp16 initialization)
+        if self.args.local_rank != -1:
+            model = torch.nn.parallel.DistributedDataParallel(
+                model,
+                device_ids=[self.args.local_rank],
+                output_device=self.args.local_rank,
+                find_unused_parameters=True,
+            )
+
+        if self.tb_writer is not None:
+            self.tb_writer.add_text("args", self.args.to_json_string())
+            self.tb_writer.add_hparams(self.args.to_sanitized_dict(), metric_dict={})
+
+        # Train!
+        if is_tpu_available():
+            total_train_batch_size = self.args.train_batch_size * xm.xrt_world_size()
+        else:
+            total_train_batch_size = (
+                self.args.train_batch_size
+                * self.args.gradient_accumulation_steps
+                * (torch.distributed.get_world_size() if self.args.local_rank != -1 else 1)
+            )
+        self.logger.info("***** Running training *****")
+        self.logger.info("  Num examples = %d", self.num_examples(train_dataloader))
+        self.logger.info("  Num Epochs = %d", num_train_epochs)
+        self.logger.info("  Instantaneous batch size per device = %d", self.args.per_gpu_train_batch_size)
+        self.logger.info("  Total train batch size (w. parallel, distributed & accumulation) = %d", total_train_batch_size)
+        self.logger.info("  Gradient Accumulation steps = %d", self.args.gradient_accumulation_steps)
+        self.logger.info("  Total optimization steps = %d", t_total)
+
+        self.global_step = 0
+        self.epoch = 0
+        epochs_trained = 0
+        steps_trained_in_current_epoch = 0
+        # Check if continuing training from a checkpoint
+        if model_path is not None:
+            # set global_step to global_step of last saved checkpoint from model path
+            try:
+                self.global_step = int(model_path.split("-")[-1].split("/")[0])
+                epochs_trained = self.global_step // (len(train_dataloader) // self.args.gradient_accumulation_steps)
+                steps_trained_in_current_epoch = self.global_step % (
+                    len(train_dataloader) // self.args.gradient_accumulation_steps
+                )
+
+                self.logger.info("  Continuing training from checkpoint, will skip to saved global_step")
+                self.logger.info("  Continuing training from epoch %d", epochs_trained)
+                self.logger.info("  Continuing training from global step %d", self.global_step)
+                self.logger.info("  Will skip the first %d steps in the first epoch", steps_trained_in_current_epoch)
+            except ValueError:
+                self.global_step = 0
+                self.logger.info("  Starting fine-tuning.")
+
+        tr_loss = 0.0
+        logging_loss = 0.0
+        model.zero_grad()
+        train_iterator = trange(
+            epochs_trained, int(num_train_epochs), desc="Epoch", disable=not self.is_local_master()
+        )
+
+        meta_gradients = []
+
+        # this is probably fine, regardless of how we track the epochs, one epoch is still one epoch
+        for epoch in train_iterator:
+
+            if isinstance(train_dataloader, DataLoader) and isinstance(train_dataloader.sampler, DistributedSampler):
+                train_dataloader.sampler.set_epoch(epoch)
+
+            if is_tpu_available():
+                parallel_loader = pl.ParallelLoader(train_dataloader, [self.args.device]).per_device_loader(
+                    self.args.device
+                )
+                epoch_iterator = tqdm(parallel_loader, desc="Iteration", disable=not self.is_local_master())
+            else:
+                epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=not self.is_local_master())
+
+            for step, datasets in enumerate(epoch_iterator):
+
+                # Skip past any already trained steps if resuming training
+                if steps_trained_in_current_epoch > 0:
+                    steps_trained_in_current_epoch -= 1
+                    continue
+
+                # datasets is a batch of datasets.  For each dataset in the batch, get the loss on metatest of \theta'
+                # then update once for the batch
+                for dset in datasets:
+
+                    metatest_set = dset[0]['metatest']
+                    metatest_sampler = RandomSampler(metatest_set)
+                    metatest_loader = DataLoader(metatest_set,
+                                                 batch_size=self.args.train_batch_size,  # TODO, is this right?
+                                                 sampler=metatest_sampler,
+                                                 collate_fn=self.inner_collator.collate_batch)  # TODO, is this right?
+
+                    # build the metatrain dataloader
+                    metatrain_set = dset[0]['metatrain']
+                    metatrain_sampler = RandomSampler(metatrain_set)
+                    metatrain_loader = DataLoader(metatrain_set,
+                                                  batch_size=self.args.train_batch_size,  # TODO, is this right?
+                                                  sampler=metatrain_sampler,
+                                                  collate_fn=self.inner_collator.collate_batch)  # TODO: is this right?
+
+                    # actually, we probably shouldn't just train on all the info of one book. Better idea is to train on
+                    # only one, or however many we need for a batch
+                    for stp, inputs in enumerate(metatest_loader):
+
+                        # for every batch in the metatest set
+                        tr_loss += self._training_step(model, inputs, optimizer, metatrain_loader)
+
+                        # keep track of gradients, want them all
+                        # now I have the gradients, but we want to accumulate them for all of this loop.
+                        for idx, p in enumerate(model.parameters()):
+                            if len(meta_gradients) < 1:
+                                meta_gradients = [float(0) for _ in model.parameters()]
+                            meta_gradients[idx] += p.grad / len(metatest_loader)
+
+                        # if we are to update on one batch, then we only need one sample from each book
+                        break
+
+                if (step + 1) % self.args.gradient_accumulation_steps == 0 or (
+                    # last step in epoch but step is always smaller than gradient_accumulation_steps
+                    len(epoch_iterator) <= self.args.gradient_accumulation_steps
+                    and (step + 1) == len(epoch_iterator)
+                ):
+
+                    # now ensure the gradients are set properly
+                    for g, p in zip(meta_gradients, model.parameters()):
+                        p.grad = g
+
+                    if self.args.fp16:
+                        torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), self.args.max_grad_norm)
+                    else:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), self.args.max_grad_norm)
+
+                    if is_tpu_available():
+                        xm.optimizer_step(optimizer)
+                    else:
+                        optimizer.step()
+
+                    scheduler.step()
+                    model.zero_grad()
+                    self.global_step += 1
+                    self.epoch = epoch + (step + 1) / len(epoch_iterator)
+
+                    # clear gradeints
+                    meta_gradients = []
+
+                    if (self.args.logging_steps > 0 and self.global_step % self.args.logging_steps == 0) or (
+                        self.global_step == 1 and self.args.logging_first_step
+                    ):
+                        logs: Dict[str, float] = {}
+                        logs["loss"] = (tr_loss - logging_loss) / self.args.logging_steps
+                        # backward compatibility for pytorch schedulers
+                        logs["learning_rate"] = (
+                            scheduler.get_last_lr()[0]
+                            if version.parse(torch.__version__) >= version.parse("1.4")
+                            else scheduler.get_lr()[0]
+                        )
+                        logging_loss = tr_loss
+
+                        self._log(logs)
+
+                        if self.args.evaluate_during_training:
+                            self.evaluate()
+
+                    if self.args.save_steps > 0 and self.global_step % self.args.save_steps == 0:
+                        # In all cases (even distributed/parallel), self.model is always a reference
+                        # to the model we want to save.
+                        if hasattr(model, "module"):
+                            assert model.module is self.model
+                        else:
+                            assert model is self.model
+                        # Save model checkpoint
+                        output_dir = os.path.join(self.args.output_dir, f"{PREFIX_CHECKPOINT_DIR}-{self.global_step}")
+
+                        self.save_model(output_dir)
+
+                        # TODO: I want to save the model to mlflow here, but how do I do it reasonably efficiently?
+                        #  start a thread?
+                        if savethread is not None:
+                            # make sure there are not multiple savethreads
+                            savethread.join()
+
+                        savethread = threading.Thread(target=self.logger.save_model,
+                                                      args=(model,
+                                                            optimizer,
+                                                            'tmp' + str(self.global_step),
+                                                            logging_loss,
+                                                            self.global_step))
+                        # start the thread
+                        savethread.daemon = True
+                        savethread.start()
+
+                        if self.is_world_master():
+                            self._rotate_checkpoints()
+
+                        if is_tpu_available():
+                            xm.rendezvous("saving_optimizer_states")
+                            xm.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
+                            xm.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+                        elif self.is_world_master():
+                            torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
+                            torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+
+                if self.args.max_steps > 0 and self.global_step > self.args.max_steps:
+                    epoch_iterator.close()
+                    break
+
+            if self.args.max_steps > 0 and self.global_step > self.args.max_steps:
+                train_iterator.close()
+                break
+            if self.args.tpu_metrics_debug:
+                # tpu-comment: Logging debug metrics for PyTorch/XLA (compile, execute times, ops, etc.)
+                xm.master_print(met.metrics_report())
+            # maybe save model here? once Every epoch? Weird that it doesn't correspond to the training though?
+
+        if self.tb_writer:
+            self.tb_writer.close()
+
+        self.logger.info("\n\nTraining completed. Do not forget to share your model on huggingface.co/models =)\n\n")
+        return TrainOutput(self.global_step, tr_loss / self.global_step)
+
     def _training_step(
-        self, model: nn.Module, inputs: BookDataset, optimizer: torch.optim.Optimizer, step: Optional[int] = 0
+        self, model: nn.Module, inputs: BookDataset, optimizer: torch.optim.Optimizer,
+            metatrain_loader: Optional[DataLoader] = None
     ) -> float:
+
         if self.args.meta == 'fomaml':
-            return self._fomaml_training_step(model, inputs, optimizer, step)
+
+            if not metatrain_loader:
+                raise ValueError('metatrain_loader must not be None')
+
+            return self._fomaml_training_step(model, inputs, optimizer, metatrain_loader)
+
         elif self.args.meta == 'none':
-            # TODO: this is kinda a problem, how do I make this call the super method?
-            #  seems this is bad practice - NEEDS TESTED!!
             return super(MetaTrainer, self)._training_step(model, inputs, optimizer)
+
         else:
             raise NotImplementedError('the requested meta-learning method is not implemented.')
 
+
     def _fomaml_training_step(
-            self, model: nn.Module, inputs: BookDataset, optimizer: torch.optim.Optimizer, step: Optional[int] = 0
+            self, model: nn.Module, inputs: Dict[str, torch.Tensor], optimizer: torch.optim.Optimizer,
+            metatrain_loader: Optional[DataLoader]
     ) -> float:
+        '''
+        I think this is wrong.  What this training step should take in is a metatest set, and a metatrain set.
+        Then this function should take num_inner_steps updates on the metatrain set, and then return the gradient
+        calculated on the metatest set.
+
+        '''
+
         '''
         So here is what I can do:
         leave trainier the same, and in this case we can think of the gradient accumulation steps as the meta-batch
@@ -915,28 +1205,30 @@ class MetaTrainer(Trainer):
         '''
         model.train()
         # inputs is a list of book datasets, so I should just train a model for each of those, given a few steps
-        # TODO: I need to make these deep copies, should be good to go then
         original_parameters = copy.deepcopy(model.state_dict())
-        gradients = {}
-        outer_loss = 0
-        for booknum, bookdset in enumerate(inputs):
-            # build a dataloader for the current book dataset
-            if len(bookdset) <= 0:
-                # ??
-                continue
-            this_sampler = RandomSampler(bookdset)
-            this_loader = DataLoader(bookdset,
-                                     batch_size=self.args.train_batch_size,
-                                     sampler=this_sampler,
-                                     collate_fn=self.inner_collator.collate_batch)
-            # now, train on this book
-            stop_next_iter = False
-            for inner_step, book_data in enumerate(this_loader):
-                # for this book, update and then train and shit
-                for k, v in book_data.items():
-                    book_data[k] = v.to(self.args.device)
 
-                outputs = model(**book_data)
+        '''
+        inputs here can be one of two things:
+        1) a dict of ['metatrain': metatrain_dataset, 'metatest': metatest_dataset]
+        2) must the meta_train dataset. 
+        
+        overall, in this method, we want one outer step to be taken.  
+        Therefore, we must do however many inner updates on the metatrain set. Then, 
+        given the network that we have ended with, calculate loss on the metatest set, and update the original model.  
+        '''
+        inner_step = 0
+        done_training = False
+
+        while not done_training:
+
+            for train_input in metatrain_loader:
+
+                # for this book, update and then train and shit
+                for k, v in train_input.items():
+                    train_input[k] = v.to(self.args.device)
+
+                outputs = model(**train_input)
+
                 loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
 
                 if self.args.n_gpu > 1:
@@ -950,42 +1242,50 @@ class MetaTrainer(Trainer):
                 else:
                     loss.backward()
 
-                if stop_next_iter:
-                    # save the gradients somehow?
-                    outer_loss += loss.item()
-                    gradients[booknum] = []
-                    for param in model.parameters():
-                        # TODO: do I need a detach here or anything?
-                        gradients[booknum].append(param.grad)
-                    # and finally reset the model to the original parameters
-                    model.load_state_dict(copy.deepcopy(original_parameters))
-                    break
-
                 optimizer.step()
                 model.zero_grad()
 
-                if inner_step >= self.args.num_inner_steps*self.args.gradient_accumulation_steps:
+                if inner_step >= self.args.num_inner_steps * self.args.gradient_accumulation_steps:
                     # we are finished training this model, so we need to take one more step
                     # (I think, and just save the gradient)
-                    stop_next_iter = True
+                    done_training = True
+                    break
 
-        # Now, take the meta step, which is the sum of all of the gradients in the gradients dictionary
-        # TODO: this is concerning, I received a key error for 0, but gradients wasn't empty. Maybe I have empty books?
-        #  for now, if empty just skip, not sure what to do
-        if gradients:
-            meta_gradient = np.zeros_like(gradients[list(gradients.keys())[0]])
+                inner_step += 1
+
+        # now get gradients for new model on the given input data.
+        # Then set the gradient of the original model appropriately
+        for k, v in inputs.items():
+            inputs[k] = v.to(self.args.device)
+
+        outputs = model(**inputs)
+        loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
+
+        if self.args.n_gpu > 1:
+            loss = loss.mean()  # mean() to average on multi-gpu parallel training
+        if self.args.gradient_accumulation_steps > 1:
+            loss = loss / self.args.gradient_accumulation_steps
+
+        if self.args.fp16:
+            with amp.scale_loss(loss, optimizer) as scaled_loss:
+                scaled_loss.backward()
         else:
-            return -1
+            loss.backward()
 
-        for v in gradients.values():
-            meta_gradient += v
+        # save the metatest gradients (i.e. the outer step gradients)
 
-        # Record outer_loss for this step
-        self.logger.log_outer(self.global_step, outer_loss)
+        gradients = []
+        for param in model.parameters():
+            gradients.append(param.grad)
 
-        # apply the meta_gradient to the network
-        for p, g in zip(model.parameters(), meta_gradient):
+        # restore the orginal model parameters
+        model.load_state_dict(original_parameters)
+
+        # apply the meta gradient to the original network
+        for p, g in zip(model.parameters(), gradients):
             p.grad = g
+
+        self.logger.log_train(self.global_step, loss.item())
 
         return loss.item()
 
@@ -994,7 +1294,7 @@ class MetaTrainer(Trainer):
     ) -> PredictionOutput:
         if self.args.meta == 'none' or self.args.meta == 'fomaml':
             return self._standard_prediction_loop(dataloader, description, prediction_loss_only)
-        elif self.args.meta == 'condition':
+        elif self.args.meta == 'conditioning':
             return self._standard_prediction_loop(dataloader, description, prediction_loss_only, condition=True)
         else:
             raise NotImplementedError('the requested meta-learning method is not implemented.')
@@ -1040,6 +1340,8 @@ class MetaTrainer(Trainer):
 
         # instead of using the dataloader, just use the dataset
         for bookdset in tqdm(dataloader.dataset, desc=description):
+
+            bookdset = bookdset[0]
             # is bookdset a dict of metatrain metatest?
             # make sure the model is set as the original paramers
             model.train()
@@ -1068,6 +1370,11 @@ class MetaTrainer(Trainer):
                 # do the fine-tuning step
                 inner_step_done = False
                 trained_steps = 0
+
+                # if conditioning, inner step is done
+                if self.args.meta == 'conditioning':
+                    inner_step_done = True
+
                 while not inner_step_done:
                     for inner_step, book_data in enumerate(train_loader):
                         # for this book, update and then train and shit
@@ -1116,8 +1423,13 @@ class MetaTrainer(Trainer):
                 assert not condition, 'training was skipped due to no metatrain data, but we are conditioning. '
             if condition:
                 for _, cond_data in enumerate(train_loader):
-                    cond_tokens = cond_data[:self.args.k]  # to condition size? which should be the same as k?
+                    cond_tokens = {
+                        'input_ids': cond_data['input_ids'][:, :self.args.k],
+                        'labels': cond_data['labels'][:, :self.args.k]
+                    }
                     break
+
+            # check to see fi cond_tokens makes sens?
 
             # now eval on the test set
             # print(f'the test loader len is (during eval) is: {len(test_loader)}')
@@ -1127,11 +1439,15 @@ class MetaTrainer(Trainer):
                 for k, v in inputs.items():
                     inputs[k] = v.to(self.args.device)
 
-                if condition:
-                    # each of v needs to have the condition tokens added
-                    assert False, 'this is not yet implemented'
+                # if condition:
+                #     # each of v needs to have the condition tokens added
+                #     assert False, 'this is not yet implemented'
 
                 with torch.no_grad():
+                    # if conditioning, then we need to run multiple steps here
+                    # if condition:
+                    #     # build the new inputs - should be of same length, just more of them?
+                    
                     outputs = model(**inputs)
                     if has_labels:
                         step_eval_loss, logits = outputs[:2]
