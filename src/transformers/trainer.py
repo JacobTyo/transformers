@@ -541,21 +541,11 @@ class Trainer:
 
                         self.save_model(output_dir)
 
-                        # TODO: I want to save the model to mlflow here, but how do I do it reasonably efficiently?
-                        #  start a thread?
-                        if savethread is not None:
-                            # make sure there are not multiple savethreads
-                            savethread.join()
-
-                        savethread = threading.Thread(target=self.logger.save_model,
-                                                      args=(model,
-                                                            optimizer,
-                                                            'tmp' + str(self.global_step),
-                                                            logging_loss,
-                                                            self.global_step))
-                        # start the thread
-                        savethread.daemon = True
-                        savethread.start()
+                        self.logger.save_model(model,
+                                               optimizer,
+                                               'checkpoint' + str(self.global_step),
+                                               logging_loss,
+                                               self.global_step)
 
                         if self.is_world_master():
                             self._rotate_checkpoints()
@@ -1115,21 +1105,11 @@ class MetaTrainer(Trainer):
 
                         self.save_model(output_dir)
 
-                        # TODO: I want to save the model to mlflow here, but how do I do it reasonably efficiently?
-                        #  start a thread?
-                        if savethread is not None:
-                            # make sure there are not multiple savethreads
-                            savethread.join()
-
-                        savethread = threading.Thread(target=self.logger.save_model,
-                                                      args=(model,
-                                                            optimizer,
-                                                            'tmp' + str(self.global_step),
-                                                            logging_loss,
-                                                            self.global_step))
-                        # start the thread
-                        savethread.daemon = True
-                        savethread.start()
+                        self.logger.save_model(model,
+                                               optimizer,
+                                               'checkpoint' + str(self.global_step),
+                                               logging_loss,
+                                               self.global_step)
 
                         if self.is_world_master():
                             self._rotate_checkpoints()
@@ -1165,7 +1145,7 @@ class MetaTrainer(Trainer):
             metatrain_loader: Optional[DataLoader] = None
     ) -> float:
 
-        if self.args.meta == 'fomaml':
+        if self.args.meta == 'fomaml' or self.args.meta == 'conditioning':
 
             if not metatrain_loader:
                 raise ValueError('metatrain_loader must not be None')
@@ -1203,9 +1183,14 @@ class MetaTrainer(Trainer):
 
         Exactly what the mechanism of duplicating, updating, and assigning gradients to parameters is, I'm not sure.
         '''
+        conditioning = False
+        if self.args.meta == 'conditioning':
+            conditioning = True
+
         model.train()
         # inputs is a list of book datasets, so I should just train a model for each of those, given a few steps
-        original_parameters = copy.deepcopy(model.state_dict())
+        if not conditioning:
+            original_parameters = copy.deepcopy(model.state_dict())
 
         '''
         inputs here can be one of two things:
@@ -1218,6 +1203,7 @@ class MetaTrainer(Trainer):
         '''
         inner_step = 0
         done_training = False
+        cond_tokens = None
 
         while not done_training:
 
@@ -1226,6 +1212,13 @@ class MetaTrainer(Trainer):
                 # for this book, update and then train and shit
                 for k, v in train_input.items():
                     train_input[k] = v.to(self.args.device)
+                    if conditioning:
+                        cond_tokens = v[0][:self.args.k].unsqueeze(0)
+                        break
+
+                if conditioning:
+                    done_training = True
+                    break
 
                 outputs = model(**train_input)
 
@@ -1255,8 +1248,12 @@ class MetaTrainer(Trainer):
 
         # now get gradients for new model on the given input data.
         # Then set the gradient of the original model appropriately
+        # add the conditioning tokens to v
         for k, v in inputs.items():
-            inputs[k] = v.to(self.args.device)
+            if conditioning:
+                inputs[k] = torch.cat((cond_tokens.repeat(v.shape[0], 1), v), 1).to(self.args.device)
+            else:
+                inputs[k] = v.to(self.args.device)
 
         outputs = model(**inputs)
         loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
@@ -1273,17 +1270,18 @@ class MetaTrainer(Trainer):
             loss.backward()
 
         # save the metatest gradients (i.e. the outer step gradients)
+        if not conditioning:
+            gradients = []
+            for param in model.parameters():
+                gradients.append(param.grad)
 
-        gradients = []
-        for param in model.parameters():
-            gradients.append(param.grad)
+            # restore the orginal model parameters
+            if not conditioning:
+                model.load_state_dict(original_parameters)
 
-        # restore the orginal model parameters
-        model.load_state_dict(original_parameters)
-
-        # apply the meta gradient to the original network
-        for p, g in zip(model.parameters(), gradients):
-            p.grad = g
+            # apply the meta gradient to the original network
+            for p, g in zip(model.parameters(), gradients):
+                p.grad = g
 
         self.logger.log_train(self.global_step, loss.item())
 
@@ -1423,13 +1421,8 @@ class MetaTrainer(Trainer):
                 assert not condition, 'training was skipped due to no metatrain data, but we are conditioning. '
             if condition:
                 for _, cond_data in enumerate(train_loader):
-                    cond_tokens = {
-                        'input_ids': cond_data['input_ids'][:, :self.args.k],
-                        'labels': cond_data['labels'][:, :self.args.k]
-                    }
+                    cond_tokens = cond_data['input_ids'][0][:self.args.k].unsqueeze(0)
                     break
-
-            # check to see fi cond_tokens makes sens?
 
             # now eval on the test set
             # print(f'the test loader len is (during eval) is: {len(test_loader)}')
@@ -1437,11 +1430,10 @@ class MetaTrainer(Trainer):
                 has_labels = any(inputs.get(k) is not None for k in ["labels", "lm_labels", "masked_lm_labels"])
 
                 for k, v in inputs.items():
-                    inputs[k] = v.to(self.args.device)
-
-                # if condition:
-                #     # each of v needs to have the condition tokens added
-                #     assert False, 'this is not yet implemented'
+                    if condition:
+                        inputs[k] = torch.cat((cond_tokens.repeat(v.shape[0], 1), v), 1).to(self.args.device)
+                    else:
+                        inputs[k] = v.to(self.args.device)
 
                 with torch.no_grad():
                     # if conditioning, then we need to run multiple steps here
@@ -1453,7 +1445,18 @@ class MetaTrainer(Trainer):
                         step_eval_loss, logits = outputs[:2]
                         # if conditioning, only count the loss of the non conditioning tokens
                         if condition:
-                            assert False, 'not yet implemented'
+                            loss_fn = torch.nn.CrossEntropyLoss()
+                            logits = logits[..., :-1, :].contiguous()
+                            targets = inputs['labels'][..., 1:].contiguous()
+                            logits = logits[:, self.args.k:, :]
+                            targets = targets[:, self.args.k:]
+                            logits = logits.view(-1, logits.size(-1))
+                            targets = targets.view(-1)
+                            if len(targets) < 1:
+                                continue
+                            loss = loss_fn(logits, targets)
+                            eval_losses += [loss.mean().item()]
+                            # eval_losses += [step_eval_loss.mean().item()]
                         else:
                             eval_losses += [step_eval_loss.mean().item()]
                     else:

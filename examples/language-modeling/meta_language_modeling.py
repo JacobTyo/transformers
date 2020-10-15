@@ -158,12 +158,13 @@ class DataTrainingArguments:
 
 def get_dataset(args: DataTrainingArguments, tokenizer: PreTrainedTokenizer, evaluate=False, local_rank=-1):
     file_path = args.eval_data_file if evaluate else args.train_data_file
+    block_size = args.block_size - args.k if args.meta == 'conditioning' else args.block_size
     if args.meta == "none" and not evaluate:
         return TextDataset(
-            tokenizer=tokenizer, file_path=file_path, block_size=args.block_size
+            tokenizer=tokenizer, file_path=file_path, block_size=block_size
         )#,train_batch_size=training_args.per_gpu_train_batch_size * training_args.n_gpu
     else:
-        return GutenburgDataset(tokenizer=tokenizer, file_path=file_path, block_size=args.block_size,
+        return GutenburgDataset(tokenizer=tokenizer, file_path=file_path, block_size=block_size,
                                 train_batch_size=training_args.per_gpu_train_batch_size * training_args.n_gpu,
                                 k=data_args.k)
 
