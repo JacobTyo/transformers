@@ -1448,8 +1448,8 @@ class MetaTrainer(Trainer):
                             loss_fn = torch.nn.CrossEntropyLoss()
                             logits = logits[..., :-1, :].contiguous()
                             targets = inputs['labels'][..., 1:].contiguous()
-                            logits = logits[:, self.args.k:, :]
-                            targets = targets[:, self.args.k:]
+                            logits = logits[:, self.args.k:, :].contiguous()
+                            targets = targets[:, self.args.k:].contiguous()
                             logits = logits.view(-1, logits.size(-1))
                             targets = targets.view(-1)
                             if len(targets) < 1:
