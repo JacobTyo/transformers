@@ -612,7 +612,8 @@ class Trainer:
             loss.backward()
 
         this_loss = loss.item()
-        self.logger.log_train(self.global_step, this_loss)
+        if self.global_step % 25 == 0:
+            self.logger.log_train(self.global_step, this_loss)
 
         return this_loss
 
@@ -1282,8 +1283,9 @@ class MetaTrainer(Trainer):
             # apply the meta gradient to the original network
             for p, g in zip(model.parameters(), gradients):
                 p.grad = g
-
-        self.logger.log_train(self.global_step, loss.item())
+        # only log every 10 steps
+        if self.global_step % 10 == 0:
+            self.logger.log_train(self.global_step, loss.item())
 
         return loss.item()
 
