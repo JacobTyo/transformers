@@ -612,8 +612,8 @@ class Trainer:
             loss.backward()
 
         this_loss = loss.item()
-        if self.global_step % 25 == 0:
-            self.logger.log_train(self.global_step, this_loss)
+        # if self.global_step % 25 == 0:
+        #     self.logger.log_train(self.global_step, this_loss)
 
         return this_loss
 
@@ -983,6 +983,7 @@ class MetaTrainer(Trainer):
                 self.logger.info("  Starting fine-tuning.")
 
         tr_loss = 0.0
+        step_loss = 0.0
         logging_loss = 0.0
         model.zero_grad()
         train_iterator = trange(
@@ -1036,7 +1037,8 @@ class MetaTrainer(Trainer):
                     for stp, inputs in enumerate(metatest_loader):
 
                         # for every batch in the metatest set
-                        tr_loss += self._training_step(model, inputs, optimizer, metatrain_loader)
+                        step_loss = self._training_step(model, inputs, optimizer, metatrain_loader)
+                        tr_loss += step_loss
 
                         # keep track of gradients, want them all
                         # now I have the gradients, but we want to accumulate them for all of this loop.
@@ -1053,6 +1055,9 @@ class MetaTrainer(Trainer):
                     len(epoch_iterator) <= self.args.gradient_accumulation_steps
                     and (step + 1) == len(epoch_iterator)
                 ):
+                    # log train loss
+                    if self.global_step % 25 == 0:
+                        self.logger.log_train(self.global_step, step_loss)
 
                     # now ensure the gradients are set properly
                     for g, p in zip(meta_gradients, model.parameters()):
@@ -1192,6 +1197,8 @@ class MetaTrainer(Trainer):
         # inputs is a list of book datasets, so I should just train a model for each of those, given a few steps
         if not conditioning:
             original_parameters = copy.deepcopy(model.state_dict())
+            # also zero the gradient, it is stored in meta-gradient
+            model.zero_grad()
 
         '''
         inputs here can be one of two things:
@@ -1236,8 +1243,9 @@ class MetaTrainer(Trainer):
                 else:
                     loss.backward()
 
-                optimizer.step()
-                model.zero_grad()
+                if (inner_step + 1) % self.args.gradient_accumulation_steps == 0:
+                    optimizer.step()
+                    model.zero_grad()
 
                 if inner_step >= self.args.num_inner_steps * self.args.gradient_accumulation_steps:
                     # we are finished training this model, so we need to take one more step
@@ -1250,6 +1258,7 @@ class MetaTrainer(Trainer):
         # now get gradients for new model on the given input data.
         # Then set the gradient of the original model appropriately
         # add the conditioning tokens to v
+        # how is gradient accumulation supposed to be handled here?
         for k, v in inputs.items():
             if conditioning:
                 inputs[k] = torch.cat((cond_tokens.repeat(v.shape[0], 1), v), 1).to(self.args.device)
@@ -1284,8 +1293,8 @@ class MetaTrainer(Trainer):
             for p, g in zip(model.parameters(), gradients):
                 p.grad = g
         # only log every 10 steps
-        if self.global_step % 10 == 0:
-            self.logger.log_train(self.global_step, loss.item())
+        # if self.global_step % 25 == 0:
+        #     self.logger.log_train(self.global_step, loss.item())
 
         return loss.item()
 
@@ -1382,8 +1391,6 @@ class MetaTrainer(Trainer):
                             inner_step_done = True
                             break
 
-                        trained_steps += 1
-
                         for k, v in book_data.items():
                             # keys are input_ids, labels, pad information if necessary
                             book_data[k] = v.to(self.args.device)
@@ -1405,8 +1412,13 @@ class MetaTrainer(Trainer):
                         else:
                             loss.backward()
 
-                        optimizer.step()
-                        model.zero_grad()
+                        # account for gradient accumulation
+                        if (trained_steps + 1) % self.args.gradient_accumulation_steps == 0:
+                            optimizer.step()
+                            model.zero_grad()
+
+                        trained_steps += 1
+
 
             test_sampler = SequentialSampler(bookdset['metatest'])
             test_loader = DataLoader(bookdset['metatest'],
