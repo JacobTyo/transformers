@@ -92,25 +92,54 @@ class DataCollatorForLanguageModeling(DataCollator):
     mlm_probability: float = 0.15
 
     def collate_batch(self, examples: List[torch.Tensor]) -> Dict[str, torch.Tensor]:
-        batch = self._tensorize_batch(examples)
+        batch, attn_mask = self._tensorize_batch(examples)
         if self.mlm:
             inputs, labels = self.mask_tokens(batch)
             return {"input_ids": inputs, "masked_lm_labels": labels}
         else:
-            return {"input_ids": batch, "labels": batch}
+            return {"input_ids": batch, "labels": batch, "attention_mask": attn_mask}
 
     def _tensorize_batch(self, examples: List[torch.Tensor]) -> torch.Tensor:
         length_of_first = examples[0].size(0)
         are_tensors_same_length = all(x.size(0) == length_of_first for x in examples)
         if are_tensors_same_length:
-            return torch.stack(examples, dim=0)
+            ret_examples = torch.stack(examples, dim=0)
+            return ret_examples, torch.ones_like(ret_examples)
         else:
             if self.tokenizer._pad_token is None:
                 raise ValueError(
                     "You are attempting to pad samples but the tokenizer you are using"
                     f" ({self.tokenizer.__class__.__name__}) does not have one."
                 )
-            return pad_sequence(examples, batch_first=True, padding_value=self.tokenizer.pad_token_id)
+            return self.my_pad_sequence(examples, batch_first=True, padding_value=self.tokenizer.pad_token_id)
+
+    @staticmethod
+    def my_pad_sequence(sequences, batch_first=False, padding_value=0.0):
+        # type: (List[Tensor], bool, float) -> Tensor
+
+        # assuming trailing dimensions and type of all the Tensors
+        # in sequences are same and fetching those from sequences[0]
+        max_size = sequences[0].size()
+        trailing_dims = max_size[1:]
+        max_len = max([s.size(0) for s in sequences])
+        if batch_first:
+            out_dims = (len(sequences), max_len) + trailing_dims
+        else:
+            out_dims = (max_len, len(sequences)) + trailing_dims
+
+        out_tensor = sequences[0].new_full(out_dims, padding_value)
+        attn_mask = sequences[0].new_full(out_dims, 0)
+        for i, tensor in enumerate(sequences):
+            length = tensor.size(0)
+            # use index notation to prevent duplicate references to the tensor
+            if batch_first:
+                out_tensor[i, :length, ...] = tensor
+                attn_mask[i, :length, ...] = 1
+            else:
+                out_tensor[:length, i, ...] = tensor
+                attn_mask[:length, i, ...] = 1
+
+        return out_tensor, attn_mask
 
     def mask_tokens(self, inputs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
