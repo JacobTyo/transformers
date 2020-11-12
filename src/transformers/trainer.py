@@ -1213,6 +1213,9 @@ class MetaTrainer(Trainer):
         done_training = False
         cond_tokens = None
 
+        percent_ignored_tokens_train = []
+        percent_ignored_tokens_test = []
+
         while not done_training:
 
             for train_input in metatrain_loader:
@@ -1227,6 +1230,54 @@ class MetaTrainer(Trainer):
                 if conditioning:
                     done_training = True
                     break
+
+                # tmp = train_input['labels'].clone()
+                # tmp[tmp != -100] = 0
+                # tmp[tmp == -100] = 1
+                # percent_ignored_tokens_train.append(torch.true_divide(torch.sum(tmp), len(torch.flatten(tmp))))
+                #
+                # print('inner loop')
+                # print(percent_ignored_tokens_train[-1])
+                # print(train_input['labels'].size()[0])
+
+                # if train_input['labels'].size()[0] == 1:
+                #     print('check this one')
+
+                # if len(train_input['labels'][0]) < 512:
+                #
+                #
+                #
+                #     testing = copy.deepcopy(train_input)
+                #     testing['labels'] = torch.zeros((1, 512))
+                #     testing['labels'][:, :len(train_input['labels'][0])] = copy.deepcopy(train_input['labels'][0])
+                #     testing['labels'][:, len(train_input['labels'][0]):] = -100
+                #     testing['labels'] = testing['labels'].type(torch.int64)
+                #
+                #     testing['input_ids'] = torch.zeros((1, 512))
+                #     testing['input_ids'][:, :len(train_input['input_ids'][0])] = copy.deepcopy(train_input['input_ids'][0])
+                #     testing['input_ids'][:, len(train_input['input_ids'][0]):] = 50256
+                #     testing['input_ids'] = testing['input_ids'].type(torch.int64)
+                #
+                #     testing['attention_mask'] = torch.zeros((1, 512))
+                #     testing['attention_mask'][:, :len(train_input['attention_mask'][0])] = \
+                #         train_input['attention_mask'][0]
+                #     testing['attention_mask'][:, len(train_input['attention_mask'][0]):] = 0
+                #     testing['attention_mask'] = testing['attention_mask'].type(torch.int64)
+                #
+                #     # for this book, update and then train and shit
+                #     for k, v in testing.items():
+                #         testing[k] = v.to(self.args.device)
+                #
+                #     testing_out = model(**testing)
+                #
+                #     outputs = model(**train_input)
+                #
+                #
+                #     print(outputs[0])
+                #     print(testing_out[0])
+                #     assert outputs[0].item() == testing_out[0].item(), 'if these arent the same, then gotta change something'
+                #
+                #     print('tmp')
 
                 outputs = model(**train_input)
 
@@ -1264,6 +1315,15 @@ class MetaTrainer(Trainer):
                 inputs[k] = torch.cat((cond_tokens.repeat(v.shape[0], 1), v), 1).to(self.args.device)
             else:
                 inputs[k] = v.to(self.args.device)
+
+        # tmp = inputs['labels'].clone()
+        # tmp[tmp != -100] = 0
+        # tmp[tmp == -100] = 1
+        # percent_ignored_tokens_test.append(torch.true_divide(torch.sum(tmp), len(torch.flatten(tmp))))
+        #
+        # print('outer loop')
+        # print(percent_ignored_tokens_test[-1])
+        # print(inputs['labels'].size()[0])
 
         outputs = model(**inputs)
         loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
@@ -1361,6 +1421,10 @@ class MetaTrainer(Trainer):
             preds: torch.Tensor = None
             label_ids: torch.Tensor = None
             skip_training = False
+
+            eval_train_percent_ignored_tokens = []
+
+
             if len(bookdset['metatrain']) < 1:
                 # This may happen if there is not a full batch, so just skip to the eval part
                 # (This is a problem for the smaller token counts)
@@ -1395,8 +1459,11 @@ class MetaTrainer(Trainer):
                             # keys are input_ids, labels, pad information if necessary
                             book_data[k] = v.to(self.args.device)
 
-                        # pad book_data if necessary
-
+                        # tmp = book_data['labels'].clone()
+                        # tmp[tmp != -100] = 0
+                        # tmp[tmp == -100] = 1
+                        # print('eval train')
+                        # print(torch.true_divide(torch.sum(tmp), len(torch.flatten(tmp))))
 
                         outputs = model(**book_data)
                         loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
@@ -1453,6 +1520,12 @@ class MetaTrainer(Trainer):
                     # if conditioning, then we need to run multiple steps here
                     # if condition:
                     #     # build the new inputs - should be of same length, just more of them?
+
+                    # tmp = inputs['labels'].clone()
+                    # tmp[tmp != -100] = 0
+                    # tmp[tmp == -100] = 1
+                    # print('eval eval')
+                    # print(torch.true_divide(torch.sum(tmp), len(torch.flatten(tmp))))
                     
                     outputs = model(**inputs)
                     if has_labels:

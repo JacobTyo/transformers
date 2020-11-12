@@ -155,6 +155,14 @@ class DataTrainingArguments:
         default=2500, metadata={"help": "The number of tokens to use in the meta-train sets"}
     )
 
+    drop_incomplete_blocks: bool = field(
+        default=False, metadata={"help": "Set to true to drop tokenized blocks with length shorter than block_size"}
+    )
+
+    keep_all_in_memory: bool = field(
+        default=False, metadata={"help": "Set to true to keep all data in memory"}
+    )
+
 
 def get_dataset(args: DataTrainingArguments, tokenizer: PreTrainedTokenizer, evaluate=False, local_rank=-1):
     file_path = args.eval_data_file if evaluate else args.train_data_file
@@ -162,11 +170,11 @@ def get_dataset(args: DataTrainingArguments, tokenizer: PreTrainedTokenizer, eva
     if args.meta == "none" and not evaluate:
         return TextDataset(
             tokenizer=tokenizer, file_path=file_path, block_size=block_size
-        )#,train_batch_size=training_args.per_gpu_train_batch_size * training_args.n_gpu
+        )
     else:
         return GutenburgDataset(tokenizer=tokenizer, file_path=file_path, block_size=block_size,
                                 train_batch_size=training_args.per_gpu_train_batch_size * training_args.n_gpu,
-                                k=data_args.k)
+                                k=data_args.k, keep_all_in_memory=data_args.keep_all_in_memory)
 
 
 def main(model_args, data_args, training_args):
@@ -276,7 +284,7 @@ def main(model_args, data_args, training_args):
     eval_dataset = get_dataset(data_args, tokenizer=tokenizer, evaluate=True) if training_args.do_eval else None
     logger.info('creating data collator')
     data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer, mlm=data_args.mlm, mlm_probability=data_args.mlm_probability
+        tokenizer=tokenizer, mlm=data_args.mlm, mlm_probability=data_args.mlm_probability, block_size=data_args.block_size
     )
 
     # TODO: is this correct for conditioning?
@@ -344,7 +352,7 @@ if __name__ == "__main__":
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
     mlflow.set_tracking_uri('http://gs18196.sp.cs.cmu.edu:6460')
-    mlflow.set_experiment("Gutenburg")
+    mlflow.set_experiment("guten")
     with mlflow.start_run(run_name=data_args.run_name):
         all_args = {}
         for d in [model_args, data_args, training_args]:

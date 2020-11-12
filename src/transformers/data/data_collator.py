@@ -90,6 +90,7 @@ class DataCollatorForLanguageModeling(DataCollator):
     tokenizer: PreTrainedTokenizer
     mlm: bool = True
     mlm_probability: float = 0.15
+    block_size: int = 1024
 
     def collate_batch(self, examples: List[torch.Tensor]) -> Dict[str, torch.Tensor]:
         batch, attn_mask = self._tensorize_batch(examples)
@@ -97,11 +98,13 @@ class DataCollatorForLanguageModeling(DataCollator):
             inputs, labels = self.mask_tokens(batch)
             return {"input_ids": inputs, "masked_lm_labels": labels}
         else:
-            return {"input_ids": batch, "labels": batch, "attention_mask": attn_mask}
+            labels = batch.clone()
+            labels[attn_mask == 0] = -100
+            return {"input_ids": batch, "labels": labels, "attention_mask": attn_mask}
 
     def _tensorize_batch(self, examples: List[torch.Tensor]) -> torch.Tensor:
         length_of_first = examples[0].size(0)
-        are_tensors_same_length = all(x.size(0) == length_of_first for x in examples)
+        are_tensors_same_length = all(x.size(0) == length_of_first for x in examples) if len(examples) > 1 else False
         if are_tensors_same_length:
             ret_examples = torch.stack(examples, dim=0)
             return ret_examples, torch.ones_like(ret_examples)
@@ -113,15 +116,14 @@ class DataCollatorForLanguageModeling(DataCollator):
                 )
             return self.my_pad_sequence(examples, batch_first=True, padding_value=self.tokenizer.pad_token_id)
 
-    @staticmethod
-    def my_pad_sequence(sequences, batch_first=False, padding_value=0.0):
+    def my_pad_sequence(self, sequences, batch_first=False, padding_value=0.0):
         # type: (List[Tensor], bool, float) -> Tensor
 
         # assuming trailing dimensions and type of all the Tensors
         # in sequences are same and fetching those from sequences[0]
         max_size = sequences[0].size()
         trailing_dims = max_size[1:]
-        max_len = max([s.size(0) for s in sequences])
+        max_len = self.block_size  # max([s.size(0) for s in sequences])
         if batch_first:
             out_dims = (len(sequences), max_len) + trailing_dims
         else:

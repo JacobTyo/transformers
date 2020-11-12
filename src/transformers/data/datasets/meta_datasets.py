@@ -28,8 +28,8 @@ class BookDataset(Dataset):
             tokenizer: PreTrainedTokenizer,
             file_path: str,
             block_size: int,
-            overwrite_cache=False,
-            train_batch_size=1
+            overwrite_cache: bool = False,
+            drop_incomplete: bool = False
     ):
         assert os.path.isfile(file_path), file_path
 
@@ -38,8 +38,9 @@ class BookDataset(Dataset):
         block_size = block_size - tokenizer.num_special_tokens_to_add(pair=False)
 
         directory, filename = os.path.split(file_path)
+        ic = '_nic' if drop_incomplete else ''
         cached_features_file = os.path.join(
-            directory, "cached_lm_{}_{}_{}".format(tokenizer.__class__.__name__, str(block_size), filename,),
+            directory, "cached_lm_{}_{}{}_{}".format(tokenizer.__class__.__name__, str(block_size), ic, filename,),
         )
 
         if os.path.exists(cached_features_file) and not overwrite_cache:
@@ -57,7 +58,6 @@ class BookDataset(Dataset):
 
             self.examples = []
 
-            # TODO: I should not need the errors here, clean data more to ensure this is fixed.
             with open(file_path, encoding="utf-8", errors="replace") as f:
                 text = f.read()
 
@@ -71,9 +71,10 @@ class BookDataset(Dataset):
                         tokenizer.build_inputs_with_special_tokens(tokenized_text[i : i + block_size])
                     )
                 else:
-                    self.examples.append(
-                        tokenizer.build_inputs_with_special_tokens(tokenized_text[i:])
-                    )
+                    if not drop_incomplete:
+                        self.examples.append(
+                            tokenizer.build_inputs_with_special_tokens(tokenized_text[i:])
+                        )
 
             logger.debug(f"The number of examples for this dataset file is: {len(self.examples)}")
 
@@ -107,7 +108,9 @@ class GutenburgDataset(Dataset):
             block_size: int,
             overwrite_cache: bool = False,
             train_batch_size: int = 1,
-            k: int = 2500
+            k: int = 2500,
+            drop_incomplete: bool = False,
+            keep_all_in_memory: bool = False
     ):
         assert os.path.isdir(file_path)
 
@@ -117,15 +120,16 @@ class GutenburgDataset(Dataset):
         self.train_batch_size = train_batch_size
         self.eval = eval
         self.k = k
-
+        self.drop_incomplete = drop_incomplete
+        self.keep_all_in_memory = keep_all_in_memory
         self.file_extensions = dict([
-        (250, '250'),
-        (500, '500'),
-        (1000, '1000'),
-        (2500, '2500'),
-        (5000, '5000'),
-        (10000, '10000'),
-    ])
+            (250, '250'),
+            (500, '500'),
+            (1000, '1000'),
+            (2500, '2500'),
+            (5000, '5000'),
+            (10000, '10000'),
+        ])
 
         # we have a list of books, now when we server each dataset, create the book datasets and return
         logger.info('building Gutenburg dataset')
@@ -135,11 +139,25 @@ class GutenburgDataset(Dataset):
                 self.books.append(os.path.join(dirpath, filename))
         logger.info(f'Gutenburg dataset built, containing {len(self.books)} books.')
 
+        self.books_in_mem = []
+        if self.keep_all_in_memory:
+            # build the book set
+            for i in range(len(self.books)):
+                metatrain, metatest = self.book_getter(i)
+                self.books_in_mem.append((metatrain, metatest))
+
     def __len__(self):
         return len(self.books)
 
     def __getitem__(self, i: int) -> List[Dict[str, Dataset]]:
 
+        if self.keep_all_in_memory:
+            return [{'metatrain': self.books_in_mem[i][0], 'metatest': self.books_in_mem[i][1]}]
+
+        metatrain, metatest = self.book_getter(i)
+        return [{'metatrain': metatrain, 'metatest': metatest}]
+
+    def book_getter(self, i):
         if self.k in self.file_extensions.keys():
             file_extension = self.file_extensions[self.k]
         else:
@@ -153,15 +171,14 @@ class GutenburgDataset(Dataset):
             file_path=self.books[i] + train_file_extension,
             block_size=self.block_size,
             overwrite_cache=self.overwrite_cache,
-            train_batch_size=self.train_batch_size
+            drop_incomplete=self.drop_incomplete
         )
         metatest = BookDataset(
             tokenizer=self.tokenizer,
             file_path=self.books[i] + test_file_extension,
             block_size=self.block_size,
             overwrite_cache=self.overwrite_cache,
-            train_batch_size=self.train_batch_size
+            drop_incomplete=False  # never drop the incomplete batch for testing, gotta test on everything
         )
-        # TODO: I don't know how to handle this
-        # This needs to return a dataset, but at the same time, I need both datasets
-        return [{'metatrain': metatrain, 'metatest': metatest}]
+
+        return metatrain, metatest
