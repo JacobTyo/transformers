@@ -163,6 +163,11 @@ class DataTrainingArguments:
         default=False, metadata={"help": "Set to true to keep all data in memory"}
     )
 
+    use_all_for_training: bool = field(
+        default=False, metadata={"help": "If set to true, then data from the meta-train and meta-test sets of the "
+                                         "training set will be used for the inner loop during training."}
+    )
+
 
 def get_dataset(args: DataTrainingArguments, tokenizer: PreTrainedTokenizer, evaluate=False, local_rank=-1):
     file_path = args.eval_data_file if evaluate else args.train_data_file
@@ -188,6 +193,7 @@ def main(model_args, data_args, training_args):
     training_args.num_eval_finetune_steps = data_args.num_eval_finetune_steps
     training_args.k = data_args.k
     training_args.run_name = data_args.run_name
+    training_args.use_all_for_training = data_args.use_all_for_training
 
     if data_args.eval_data_file is None and training_args.do_eval:
         raise ValueError(

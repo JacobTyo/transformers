@@ -1037,7 +1037,16 @@ class MetaTrainer(Trainer):
                     for stp, inputs in enumerate(metatest_loader):
 
                         # for every batch in the metatest set
-                        step_loss = self._training_step(model, inputs, optimizer, metatrain_loader)
+                        # if use_all_for_training flag set, then probabilistically pick between metatrain and metatest
+                        # loaders for inner step
+                        if self.args.use_all_for_training:
+                            tmp = len(metatrain_loader) + len(metatest_loader)
+                            inner_step_loader = np.random.choice([metatrain_loader, metatest_loader],
+                                                                 p=[len(metatrain_loader)/tmp, len(metatest_loader)/tmp]
+                                                                 )
+                        else:
+                            inner_step_loader = metatrain_loader
+                        step_loss = self._training_step(model, inputs, optimizer, inner_step_loader)
                         tr_loss += step_loss
 
                         # keep track of gradients, want them all
