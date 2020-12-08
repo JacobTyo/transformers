@@ -1474,7 +1474,8 @@ class MetaTrainer(Trainer):
                 while not inner_step_done:
                     for inner_step, book_data in enumerate(train_loader):
                         # for this book, update and then train and shit
-                        if trained_steps >= self.args.num_eval_finetune_steps * self.args.gradient_accumulation_steps:
+                        if (trained_steps >= self.args.num_eval_finetune_steps * self.args.gradient_accumulation_steps) or \
+                                (self.args.no_ga_in_innerstep and trained_steps >= self.args.num_eval_finetune_steps):
                             inner_step_done = True
                             break
 
