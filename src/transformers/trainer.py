@@ -19,11 +19,12 @@ from torch.utils.data.dataset import Dataset
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data.sampler import RandomSampler, Sampler, SequentialSampler
 from tqdm.auto import tqdm, trange
+from torch.optim import SGD
 
 from .data.datasets.meta_datasets import BookDataset
 from .data.data_collator import DataCollator, DefaultDataCollator, DataCollatorForMetaLanguageModeling
 from .modeling_utils import PreTrainedModel
-from .optimization import AdamW, get_linear_schedule_with_warmup
+# from .optimization import AdamW, get_linear_schedule_with_warmup
 from .trainer_utils import PREFIX_CHECKPOINT_DIR, EvalPrediction, PredictionOutput, TrainOutput
 from .training_args import TrainingArguments, is_tpu_available
 from .data import Logger
@@ -319,7 +320,7 @@ class Trainer:
             return self.optimizers
         # Prepare optimizer and schedule (linear warmup and decay)
         no_decay = ["bias", "LayerNorm.weight"]
-        optimizer_grouped_parameters = [
+        params = [
             {
                 "params": [p for n, p in self.model.named_parameters() if not any(nd in n for nd in no_decay)],
                 "weight_decay": self.args.weight_decay,
@@ -329,10 +330,22 @@ class Trainer:
                 "weight_decay": 0.0,
             },
         ]
-        optimizer = AdamW(optimizer_grouped_parameters, lr=self.args.learning_rate, eps=self.args.adam_epsilon)
-        scheduler = get_linear_schedule_with_warmup(
-            optimizer, num_warmup_steps=self.args.warmup_steps, num_training_steps=num_training_steps
-        )
+        # optimizer_grouped_parameters = [
+        #     {
+        #         "params": [p for n, p in self.model.named_parameters() if not any(nd in n for nd in no_decay)],
+        #         "weight_decay": self.args.weight_decay,
+        #     },
+        #     {
+        #         "params": [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay)],
+        #         "weight_decay": 0.0,
+        #     },
+        # ]
+        optimizer = SGD(params, lr=self.args.learning_rate, momentum=0)
+        #optimizer = AdamW(optimizer_grouped_parameters, lr=self.args.learning_rate, eps=self.args.adam_epsilon)
+        # scheduler = get_linear_schedule_with_warmup(
+        #     optimizer, num_warmup_steps=self.args.warmup_steps, num_training_steps=num_training_steps
+        # )
+        scheduler = None
         self.optimizers = optimizer, scheduler
         return optimizer, scheduler
 
@@ -912,13 +925,13 @@ class MetaTrainer(Trainer):
         if (
             model_path is not None
             and os.path.isfile(os.path.join(model_path, "optimizer.pt"))
-            and os.path.isfile(os.path.join(model_path, "scheduler.pt"))
+            #and os.path.isfile(os.path.join(model_path, "scheduler.pt"))
         ):
             # Load in optimizer and scheduler states
             optimizer.load_state_dict(
                 torch.load(os.path.join(model_path, "optimizer.pt"), map_location=self.args.device)
             )
-            scheduler.load_state_dict(torch.load(os.path.join(model_path, "scheduler.pt")))
+            #scheduler.load_state_dict(torch.load(os.path.join(model_path, "scheduler.pt")))
 
         model = self.model
         if self.args.fp16:
@@ -1054,7 +1067,7 @@ class MetaTrainer(Trainer):
                         for idx, p in enumerate(model.parameters()):
                             if len(meta_gradients) < 1:
                                 meta_gradients = [float(0) for _ in model.parameters()]
-                            meta_gradients[idx] += p.grad / len(metatest_loader)
+                            meta_gradients[idx] += p.grad / self.args.gradient_accumulation_steps
 
                         # if we are to update on one batch, then we only need one sample from each book
                         break
@@ -1082,7 +1095,7 @@ class MetaTrainer(Trainer):
                     else:
                         optimizer.step()
 
-                    scheduler.step()
+                    #scheduler.step()
                     model.zero_grad()
                     self.global_step += 1
                     self.epoch = epoch + (step + 1) / len(epoch_iterator)
@@ -1096,11 +1109,11 @@ class MetaTrainer(Trainer):
                         logs: Dict[str, float] = {}
                         logs["loss"] = (tr_loss - logging_loss) / self.args.logging_steps
                         # backward compatibility for pytorch schedulers
-                        logs["learning_rate"] = (
-                            scheduler.get_last_lr()[0]
-                            if version.parse(torch.__version__) >= version.parse("1.4")
-                            else scheduler.get_lr()[0]
-                        )
+                        # logs["learning_rate"] = (
+                        #     scheduler.get_last_lr()[0]
+                        #     if version.parse(torch.__version__) >= version.parse("1.4")
+                        #     else scheduler.get_lr()[0]
+                        # )
                         logging_loss = tr_loss
 
                         self._log(logs)
@@ -1132,10 +1145,10 @@ class MetaTrainer(Trainer):
                         if is_tpu_available():
                             xm.rendezvous("saving_optimizer_states")
                             xm.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
-                            xm.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+                            #xm.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
                         elif self.is_world_master():
                             torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
-                            torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+                            #torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
 
                 if self.args.max_steps > 0 and self.global_step > self.args.max_steps:
                     epoch_iterator.close()
@@ -1307,7 +1320,8 @@ class MetaTrainer(Trainer):
                     optimizer.step()
                     model.zero_grad()
 
-                if inner_step >= self.args.num_inner_steps * self.args.gradient_accumulation_steps:
+                if (inner_step >= self.args.num_inner_steps * self.args.gradient_accumulation_steps) or \
+                        (self.args.no_ga_in_innerstep and inner_step >= self.args.num_inner_steps):
                     # we are finished training this model, so we need to take one more step
                     # (I think, and just save the gradient)
                     done_training = True

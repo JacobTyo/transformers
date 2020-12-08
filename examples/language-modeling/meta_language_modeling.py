@@ -168,6 +168,10 @@ class DataTrainingArguments:
                                          "training set will be used for the inner loop during training."}
     )
 
+    no_ga_in_innerstep: bool = field(
+        default=False, metadata={"help": "If set, do not count gradient accumulation in the inner step"}
+    )
+
 
 def get_dataset(args: DataTrainingArguments, tokenizer: PreTrainedTokenizer, evaluate=False, local_rank=-1):
     file_path = args.eval_data_file if evaluate else args.train_data_file
@@ -194,6 +198,7 @@ def main(model_args, data_args, training_args):
     training_args.k = data_args.k
     training_args.run_name = data_args.run_name
     training_args.use_all_for_training = data_args.use_all_for_training
+    training_args.no_ga_in_innerstep = data_args.no_ga_in_innerstep
 
     if data_args.eval_data_file is None and training_args.do_eval:
         raise ValueError(
