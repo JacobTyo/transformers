@@ -19,12 +19,12 @@ from torch.utils.data.dataset import Dataset
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data.sampler import RandomSampler, Sampler, SequentialSampler
 from tqdm.auto import tqdm, trange
-from torch.optim import SGD
+# from torch.optim import SGD
 
 from .data.datasets.meta_datasets import BookDataset
 from .data.data_collator import DataCollator, DefaultDataCollator, DataCollatorForMetaLanguageModeling
 from .modeling_utils import PreTrainedModel
-# from .optimization import AdamW, get_linear_schedule_with_warmup
+from .optimization import AdamW, get_linear_schedule_with_warmup
 from .trainer_utils import PREFIX_CHECKPOINT_DIR, EvalPrediction, PredictionOutput, TrainOutput
 from .training_args import TrainingArguments, is_tpu_available
 from .data import Logger
@@ -320,17 +320,7 @@ class Trainer:
             return self.optimizers
         # Prepare optimizer and schedule (linear warmup and decay)
         no_decay = ["bias", "LayerNorm.weight"]
-        params = [
-            {
-                "params": [p for n, p in self.model.named_parameters() if not any(nd in n for nd in no_decay)],
-                "weight_decay": self.args.weight_decay,
-            },
-            {
-                "params": [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay)],
-                "weight_decay": 0.0,
-            },
-        ]
-        # optimizer_grouped_parameters = [
+        # params = [
         #     {
         #         "params": [p for n, p in self.model.named_parameters() if not any(nd in n for nd in no_decay)],
         #         "weight_decay": self.args.weight_decay,
@@ -340,12 +330,22 @@ class Trainer:
         #         "weight_decay": 0.0,
         #     },
         # ]
-        optimizer = SGD(params, lr=self.args.learning_rate, momentum=0)
-        #optimizer = AdamW(optimizer_grouped_parameters, lr=self.args.learning_rate, eps=self.args.adam_epsilon)
-        # scheduler = get_linear_schedule_with_warmup(
-        #     optimizer, num_warmup_steps=self.args.warmup_steps, num_training_steps=num_training_steps
-        # )
-        scheduler = None
+        optimizer_grouped_parameters = [
+            {
+                "params": [p for n, p in self.model.named_parameters() if not any(nd in n for nd in no_decay)],
+                "weight_decay": self.args.weight_decay,
+            },
+            {
+                "params": [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay)],
+                "weight_decay": 0.0,
+            },
+        ]
+        # optimizer = SGD(params, lr=self.args.learning_rate, momentum=0)
+        optimizer = AdamW(optimizer_grouped_parameters, lr=self.args.learning_rate, eps=self.args.adam_epsilon)
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer, num_warmup_steps=self.args.warmup_steps, num_training_steps=num_training_steps
+        )
+        # scheduler = None
         self.optimizers = optimizer, scheduler
         return optimizer, scheduler
 
