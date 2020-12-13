@@ -1068,15 +1068,17 @@ class MetaTrainer(Trainer):
                             if len(meta_gradients) < 1:
                                 meta_gradients = [float(0) for _ in model.parameters()]
                             meta_gradients[idx] += p.grad / self.args.gradient_accumulation_steps
+                        print('tracking grads for outer update')
 
                         # if we are to update on one batch, then we only need one sample from each book
                         break
 
-                if (step + 1) % self.args.gradient_accumulation_steps == 0 or (
+                if (not self.args.no_ga_in_outerstep and ((step + 1) % self.args.gradient_accumulation_steps == 0 or (
                     # last step in epoch but step is always smaller than gradient_accumulation_steps
                     len(epoch_iterator) <= self.args.gradient_accumulation_steps
                     and (step + 1) == len(epoch_iterator)
-                ):
+                ))) or self.args.no_ga_in_outerstep:
+
                     # log train loss
                     if self.global_step % 25 == 0:
                         self.logger.log_train(self.global_step, step_loss)
@@ -1090,6 +1092,7 @@ class MetaTrainer(Trainer):
                     else:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), self.args.max_grad_norm)
 
+                    print('doing outer update')
                     if is_tpu_available():
                         xm.optimizer_step(optimizer)
                     else:
@@ -1315,8 +1318,10 @@ class MetaTrainer(Trainer):
                         scaled_loss.backward()
                 else:
                     loss.backward()
+                print('tracking grads for inner update')
 
                 if (inner_step + 1) % self.args.gradient_accumulation_steps == 0:
+                    print('doing inner update')
                     optimizer.step()
                     model.zero_grad()
 
@@ -1347,6 +1352,9 @@ class MetaTrainer(Trainer):
         # print('outer loop')
         # print(percent_ignored_tokens_test[-1])
         # print(inputs['labels'].size()[0])
+
+        # just in case
+        model.zero_grad()
 
         outputs = model(**inputs)
         loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
