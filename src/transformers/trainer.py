@@ -1068,7 +1068,6 @@ class MetaTrainer(Trainer):
                             if len(meta_gradients) < 1:
                                 meta_gradients = [float(0) for _ in model.parameters()]
                             meta_gradients[idx] += p.grad / self.args.gradient_accumulation_steps
-                        print('tracking grads for outer update')
 
                         # if we are to update on one batch, then we only need one sample from each book
                         break
@@ -1092,7 +1091,6 @@ class MetaTrainer(Trainer):
                     else:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), self.args.max_grad_norm)
 
-                    print('doing outer update')
                     if is_tpu_available():
                         xm.optimizer_step(optimizer)
                     else:
@@ -1318,10 +1316,8 @@ class MetaTrainer(Trainer):
                         scaled_loss.backward()
                 else:
                     loss.backward()
-                print('tracking grads for inner update')
 
                 if (inner_step + 1) % self.args.gradient_accumulation_steps == 0:
-                    print('doing inner update')
                     optimizer.step()
                     model.zero_grad()
 
