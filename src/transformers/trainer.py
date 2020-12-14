@@ -1310,8 +1310,8 @@ class MetaTrainer(Trainer):
 
                 if self.args.n_gpu > 1:
                     loss = loss.mean()  # mean() to average on multi-gpu parallel training
-                if self.args.gradient_accumulation_steps > 1:
-                    loss = loss / self.args.gradient_accumulation_steps
+                if self.args.gradient_accumulation_steps > 1 and not self.args.no_ga_in_innerstep:
+                        loss = loss / self.args.gradient_accumulation_steps
 
                 if self.args.fp16:
                     with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -1361,7 +1361,7 @@ class MetaTrainer(Trainer):
 
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training
-        if self.args.gradient_accumulation_steps > 1:
+        if self.args.gradient_accumulation_steps > 1 and not self.args.no_ga_in_outerstep:
             loss = loss / self.args.gradient_accumulation_steps
 
         if self.args.fp16:
